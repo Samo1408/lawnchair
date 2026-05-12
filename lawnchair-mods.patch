@@ -295,7 +295,7 @@ new file mode 100644
 index 0000000..a3f9c12
 --- /dev/null
 +++ b/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,292 @@
 +package app.lawnchair.ui.popup
 +
 +import android.content.Context

@@ -7,8 +7,15 @@ Registers 6 new SystemShortcut.Factory entries in getSupportedShortcuts():
   Advanced Permissions, Share App, Install to User,
   Show Data Dir, Show App Dir, Select
 
-Fix: use android.app.AlertDialog (not appcompat) so it works with
-the Launcher activity's non-AppCompat theme.
+Fixes:
+  - Use ContextThemeWrapper(Theme_DeviceDefault_Light_Dialog_Alert) for all
+    AlertDialog.Builder calls so text/background are readable in the
+    Launcher's non-AppCompat dark theme.
+  - Use PackageManager.MATCH_ALL flag in getInstalledApplications() so the
+    app list is never empty on Android 11+ (API 30+).
+  - Add MultiUserHelper.getAppsForUser() + SelectShortcut.groupByUser() so
+    "Group by User Profile" creates one DrawerFolder per secondary user /
+    work profile, named "user <id>", containing all apps for that user.
 ---
 
 diff --git a/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt b/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt
@@ -165,10 +172,10 @@ index 0000000..0bad932
 
 diff --git a/lawnchair/src/app/lawnchair/mods/MultiUserHelper.kt b/lawnchair/src/app/lawnchair/mods/MultiUserHelper.kt
 new file mode 100644
-index 0000000..cfd55b2
+index 0000000..d4f8a21
 --- /dev/null
 +++ b/lawnchair/src/app/lawnchair/mods/MultiUserHelper.kt
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,28 @@
 +package app.lawnchair.mods
 +
 +import android.content.Context
@@ -187,6 +194,15 @@ index 0000000..cfd55b2
 +
 +    suspend fun installToUser(packageName: String, userId: Int): RootCommandHelper.RootResult =
 +        RootCommandHelper.exec("pm install-existing --user $userId $packageName")
++
++    /** Returns all package names installed for [userId] via root shell. */
++    suspend fun getAppsForUser(userId: Int): List<String> {
++        val result = RootCommandHelper.exec("pm list packages --user $userId")
++        if (!result.success) return emptyList()
++        return result.output.lines()
++            .filter { it.startsWith("package:") }
++            .map { it.removePrefix("package:").trim() }
++    }
 +}
 
 diff --git a/lawnchair/src/app/lawnchair/mods/RootCommandHelper.kt b/lawnchair/src/app/lawnchair/mods/RootCommandHelper.kt
@@ -276,10 +292,10 @@ index 0000000..9c0788b
 
 diff --git a/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt b/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt
 new file mode 100644
-index 0000000..96deeb4
+index 0000000..a3f9c12
 --- /dev/null
 +++ b/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,284 @@
 +package app.lawnchair.ui.popup
 +
 +import android.content.Context
@@ -287,6 +303,7 @@ index 0000000..96deeb4
 +import android.content.pm.ApplicationInfo
 +import android.content.pm.PackageManager
 +import android.net.Uri
++import android.view.ContextThemeWrapper
 +import android.view.View
 +import android.widget.EditText
 +import android.widget.Toast
@@ -311,6 +328,16 @@ index 0000000..96deeb4
 +
 +    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 +
++    /**
++     * Wraps [ctx] with Theme_DeviceDefault_Light_Dialog_Alert so every
++     * AlertDialog has a white background with dark text, regardless of
++     * the Launcher activity's own dark/opaque theme.
++     */
++    private fun alertBuilder(ctx: Context) =
++        AlertDialog.Builder(
++            ContextThemeWrapper(ctx, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
++        )
++
 +    // ─── Advanced Permissions ────────────────────────────────────────────────
 +
 +    val ADVANCED_PERMISSIONS = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
@@ -323,7 +350,7 @@ index 0000000..96deeb4
 +    ) : SystemShortcut<Launcher>(R.drawable.ic_info_no_shadow, R.string.mods_advanced_permissions, launcher, itemInfo, view) {
 +
 +        override fun onClick(v: View) {
-+            AlertDialog.Builder(mTarget)
++            alertBuilder(mTarget)
 +                .setTitle("Advanced Permissions")
 +                .setItems(arrayOf("Grant Usage Stats", "Grant Access All Files", "Grant Unknown Sources", "Grant All")) { _, which ->
 +                    scope.launch {
@@ -375,7 +402,7 @@ index 0000000..96deeb4
 +    ) : SystemShortcut<Launcher>(R.drawable.ic_install_no_shadow, R.string.mods_install_to_user, launcher, itemInfo, view) {
 +
 +        override fun onClick(v: View) {
-+            AlertDialog.Builder(mTarget)
++            alertBuilder(mTarget)
 +                .setTitle("Install to User")
 +                .setItems(users.map { it.name }.toTypedArray()) { _, which ->
 +                    val user = users[which]
@@ -399,7 +426,7 @@ index 0000000..96deeb4
 +    private class ShowDataDirShortcut(
 +        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
 +    ) : SystemShortcut<Launcher>(R.drawable.ic_info_no_shadow, R.string.mods_show_data_dir, launcher, itemInfo, view) {
-+
+
 +        override fun onClick(v: View) {
 +            runCatching { RootExplorerHelper.openDataDir(mTarget, pkg) }
 +                .onFailure { toast(mTarget, "Error: ${it.message}") }
@@ -438,14 +465,18 @@ index 0000000..96deeb4
 +        override fun onClick(v: View) {
 +            val ctx = mTarget
 +            val pm  = ctx.packageManager
-+            val allApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
++            // Fix: MATCH_ALL is required on Android 11+ (API 30) so that
++            // getInstalledApplications() returns all packages instead of
++            // only the caller's own package (which made the list appear empty).
++            @Suppress("DEPRECATION")
++            val allApps = pm.getInstalledApplications(PackageManager.GET_META_DATA or PackageManager.MATCH_ALL)
 +                .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 }
 +                .sortedBy { pm.getApplicationLabel(it).toString() }
 +            val labels  = allApps.map { pm.getApplicationLabel(it).toString() }.toTypedArray()
 +            val pkgList = allApps.map { it.packageName }
 +            val checked = BooleanArray(allApps.size) { allApps[it].packageName == pkg }
 +
-+            AlertDialog.Builder(ctx)
++            alertBuilder(ctx)
 +                .setTitle("Select Apps")
 +                .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
 +                .setPositiveButton("Next") { _, _ ->
@@ -458,20 +489,21 @@ index 0000000..96deeb4
 +
 +        private fun showActionDialog(ctx: Context, selected: List<String>) {
 +            val count = selected.size
-+            AlertDialog.Builder(ctx)
++            alertBuilder(ctx)
 +                .setTitle("$count app${if (count == 1) "" else "s"} selected")
-+                .setItems(arrayOf("Merge to Folder", "Share", "Uninstall")) { _, which ->
++                .setItems(arrayOf("Merge to Folder", "Group by User Profile", "Share", "Uninstall")) { _, which ->
 +                    when (which) {
 +                        0 -> showMergeDialog(ctx, selected)
-+                        1 -> scope.launch {
-+                            selected.forEach { pkg ->
-+                                runCatching { ApkShareHelper.shareApp(ctx, pkg) }
-+                                    .onFailure { toast(ctx, "Share failed for $pkg") }
++                        1 -> groupByUser(ctx)
++                        2 -> scope.launch {
++                            selected.forEach { p ->
++                                runCatching { ApkShareHelper.shareApp(ctx, p) }
++                                    .onFailure { toast(ctx, "Share failed for $p") }
 +                            }
 +                        }
-+                        2 -> selected.forEach { pkg ->
++                        3 -> selected.forEach { p ->
 +                            ctx.startActivity(Intent(Intent.ACTION_UNINSTALL_PACKAGE).apply {
-+                                data = Uri.parse("package:$pkg")
++                                data = Uri.parse("package:$p")
 +                                putExtra(Intent.EXTRA_RETURN_RESULT, true)
 +                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 +                            })
@@ -481,12 +513,41 @@ index 0000000..96deeb4
 +                .show()
 +        }
 +
++        /**
++         * Fix: creates one DrawerFolder per secondary user / work-profile.
++         * Each folder is named "user <id>" and is populated with all packages
++         * reported by `pm list packages --user <id>` (requires root).
++         */
++        private fun groupByUser(ctx: Context) {
++            val users = MultiUserHelper.getSecondaryUsers(ctx)
++            if (users.isEmpty()) {
++                toast(ctx, "No secondary users / work profiles found")
++                return
++            }
++            scope.launch {
++                var created = 0
++                users.forEach { user ->
++                    val apps = MultiUserHelper.getAppsForUser(user.id)
++                        .filter { it.isNotBlank() }
++                    if (apps.isNotEmpty()) {
++                        DrawerFolderHelper.createFolder(ctx, user.name, apps)
++                        created++
++                    }
++                }
++                toast(
++                    ctx,
++                    if (created > 0) "Created $created folder(s) for user profiles"
++                    else "No apps found for user profiles (root may be required)"
++                )
++            }
++        }
++
 +        private fun showMergeDialog(ctx: Context, selected: List<String>) {
 +            scope.launch {
 +                val existing = DrawerFolderHelper.load(ctx)
 +                val options  = (listOf("+ New folder") + existing.map { it.name }).toTypedArray()
 +                withContext(Dispatchers.Main) {
-+                    AlertDialog.Builder(ctx)
++                    alertBuilder(ctx)
 +                        .setTitle("Merge to Folder")
 +                        .setItems(options) { _, which ->
 +                            if (which == 0) {
@@ -505,8 +566,10 @@ index 0000000..96deeb4
 +        }
 +
 +        private fun showCreateFolderDialog(ctx: Context, selected: List<String>) {
-+            val input = EditText(ctx).apply { hint = "Folder name" }
-+            AlertDialog.Builder(ctx)
++            val input = EditText(
++                ContextThemeWrapper(ctx, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
++            ).apply { hint = "Folder name" }
++            alertBuilder(ctx)
 +                .setTitle("New Folder")
 +                .setView(input)
 +                .setPositiveButton("Create") { _, _ ->

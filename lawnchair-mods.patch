@@ -3,19 +3,23 @@ From: Lawnchair Mods <mods@lawnchair>
 Date: Mon, 12 May 2026 00:00:00 +0000
 Subject: [PATCH] Add mod shortcuts to Lawnchair long-press menu
 
-Registers 6 new SystemShortcut.Factory entries in getSupportedShortcuts():
+Registers 7 new SystemShortcut.Factory entries in getSupportedShortcuts():
   Advanced Permissions, Share App, Install to User,
-  Show Data Dir, Show App Dir, Select
+  Show Data Dir, Show App Dir, Group by User Profile, Select
 
 Fixes:
   - Use ContextThemeWrapper(Theme_DeviceDefault_Light_Dialog_Alert) for all
     AlertDialog.Builder calls so text/background are readable in the
     Launcher's non-AppCompat dark theme.
-  - Use PackageManager.MATCH_ALL flag in getInstalledApplications() so the
-    app list is never empty on Android 11+ (API 30+).
-  - Add MultiUserHelper.getAppsForUser() + SelectShortcut.groupByUser() so
-    "Group by User Profile" creates one DrawerFolder per secondary user /
-    work profile, named "user <id>", containing all apps for that user.
+  - Show Data Dir and Show App Dir are no longer gated on hasExplorer().
+    They now always appear and show an error toast if no supported file
+    manager is installed instead of silently disappearing.
+  - Group by User Profile is now a standalone top-level shortcut (was
+    buried inside the Select action dialog and unreachable).
+  - Select now prompts the user to pick a profile first, then lists that
+    profile's apps. Work-profile / secondary-user apps are enumerated via
+    root shell (`pm list packages --user <id>`) so only user-0 apps are
+    no longer shown.
 ---
 
 diff --git a/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt b/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt
@@ -292,10 +296,10 @@ index 0000000..9c0788b
 
 diff --git a/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt b/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt
 new file mode 100644
-index 0000000..a3f9c12
+index 0000000..b7e4f91
 --- /dev/null
 +++ b/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,345 @@
 +package app.lawnchair.ui.popup
 +
 +import android.content.Context
@@ -416,10 +420,11 @@ index 0000000..a3f9c12
 +    }
 +
 +    // ─── Show Data Dir ───────────────────────────────────────────────────────
++    // Fix: no longer gated on hasExplorer() — always shown; shows an error
++    // toast on tap when no supported file manager is installed.
 +
 +    val SHOW_DATA_DIR = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
 +        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
-+        if (!RootExplorerHelper.hasExplorer(launcher)) return@Factory null
 +        ShowDataDirShortcut(launcher, itemInfo, view, pkg)
 +    }
 +
@@ -434,10 +439,11 @@ index 0000000..a3f9c12
 +    }
 +
 +    // ─── Show App Dir ────────────────────────────────────────────────────────
++    // Fix: no longer gated on hasExplorer() — always shown; shows an error
++    // toast on tap when no supported file manager is installed.
 +
 +    val SHOW_APP_DIR = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
 +        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
-+        if (!RootExplorerHelper.hasExplorer(launcher)) return@Factory null
 +        ShowAppDirShortcut(launcher, itemInfo, view, pkg)
 +    }
 +
@@ -448,6 +454,43 @@ index 0000000..a3f9c12
 +        override fun onClick(v: View) {
 +            runCatching { RootExplorerHelper.openAppDir(mTarget, pkg) }
 +                .onFailure { toast(mTarget, "Error: ${it.message}") }
++        }
++    }
++
++    // ─── Group by User Profile ───────────────────────────────────────────────
++    // Fix: now a standalone top-level shortcut (was buried inside Select and
++    // therefore unreachable). Only shown when secondary users / work profiles
++    // exist. Uses root to enumerate each user's packages and creates one
++    // DrawerFolder named "user <id>" per profile.
++
++    val GROUP_BY_USER = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
++        val users = MultiUserHelper.getSecondaryUsers(launcher)
++        if (users.isEmpty()) return@Factory null
++        GroupByUserShortcut(launcher, itemInfo, view, users)
++    }
++
++    private class GroupByUserShortcut(
++        launcher: Launcher, itemInfo: ItemInfo, view: View,
++        private val users: List<UserInfo>,
++    ) : SystemShortcut<Launcher>(R.drawable.ic_install_no_shadow, R.string.mods_group_by_user, launcher, itemInfo, view) {
++
++        override fun onClick(v: View) {
++            val ctx = mTarget
++            scope.launch {
++                var created = 0
++                users.forEach { user ->
++                    val apps = MultiUserHelper.getAppsForUser(user.id).filter { it.isNotBlank() }
++                    if (apps.isNotEmpty()) {
++                        DrawerFolderHelper.createFolder(ctx, user.name, apps)
++                        created++
++                    }
++                }
++                toast(
++                    ctx,
++                    if (created > 0) "Created $created folder(s) for user profiles"
++                    else "No apps found for user profiles (root may be required)"
++                )
++            }
 +        }
 +    }
 +
@@ -464,44 +507,87 @@ index 0000000..a3f9c12
 +
 +        override fun onClick(v: View) {
 +            val ctx = mTarget
-+            val pm  = ctx.packageManager
-+            // Fix: MATCH_ALL is required on Android 11+ (API 30) so that
-+            // getInstalledApplications() returns all packages instead of
-+            // only the caller's own package (which made the list appear empty).
-+            @Suppress("DEPRECATION")
-+            val allApps = pm.getInstalledApplications(PackageManager.GET_META_DATA or PackageManager.MATCH_ALL)
-+                .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 }
-+                .sortedBy { pm.getApplicationLabel(it).toString() }
-+            val labels  = allApps.map { pm.getApplicationLabel(it).toString() }.toTypedArray()
-+            val pkgList = allApps.map { it.packageName }
-+            val checked = BooleanArray(allApps.size) { allApps[it].packageName == pkg }
++            val users = MultiUserHelper.getSecondaryUsers(ctx)
++            if (users.isEmpty()) {
++                showAppListForUser(ctx, 0, null)
++            } else {
++                // Fix: pick a user profile first so secondary-user apps are visible.
++                val entries = (listOf("Primary User (user 0)") + users.map { it.name }).toTypedArray()
++                alertBuilder(ctx)
++                    .setTitle("Select User Profile")
++                    .setItems(entries) { _, which ->
++                        if (which == 0) showAppListForUser(ctx, 0, null)
++                        else showAppListForUser(ctx, users[which - 1].id, users[which - 1].name)
++                    }
++                    .show()
++            }
++        }
 +
-+            alertBuilder(ctx)
-+                .setTitle("Select Apps")
-+                .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
-+                .setPositiveButton("Next") { _, _ ->
-+                    val selected = pkgList.filterIndexed { i, _ -> checked[i] }
-+                    if (selected.isNotEmpty()) showActionDialog(ctx, selected)
++        /**
++         * Fix: loads the app list for [userId].
++         *  - userId 0  → PackageManager.getInstalledApplications() with MATCH_ALL.
++         *  - Other ids → root shell `pm list packages --user <id>` so work-profile
++         *    and secondary-user apps are properly enumerated.
++         */
++        private fun showAppListForUser(ctx: Context, userId: Int, userName: String?) {
++            scope.launch {
++                val pm = ctx.packageManager
++                val appPairs: List<Pair<String, String>> = if (userId == 0) {
++                    @Suppress("DEPRECATION")
++                    pm.getInstalledApplications(PackageManager.GET_META_DATA or PackageManager.MATCH_ALL)
++                        .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 }
++                        .sortedBy { pm.getApplicationLabel(it).toString() }
++                        .map { Pair(it.packageName, pm.getApplicationLabel(it).toString()) }
++                } else {
++                    MultiUserHelper.getAppsForUser(userId)
++                        .filter { it.isNotBlank() }
++                        .map { p ->
++                            val label = runCatching {
++                                pm.getApplicationLabel(pm.getApplicationInfo(p, 0)).toString()
++                            }.getOrDefault(p)
++                            Pair(p, label)
++                        }
++                        .sortedBy { it.second }
 +                }
-+                .setNegativeButton("Cancel", null)
-+                .show()
++
++                withContext(Dispatchers.Main) {
++                    if (appPairs.isEmpty()) {
++                        toast(ctx, "No apps found${if (userName != null) " for $userName" else ""}")
++                        return@withContext
++                    }
++                    val labels  = appPairs.map { it.second }.toTypedArray()
++                    val pkgList = appPairs.map { it.first }
++                    val checked = BooleanArray(appPairs.size) { appPairs[it].first == pkg }
++
++                    alertBuilder(ctx)
++                        .setTitle("Select Apps${if (userName != null) " ($userName)" else ""}")
++                        .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
++                            checked[which] = isChecked
++                        }
++                        .setPositiveButton("Next") { _, _ ->
++                            val selected = pkgList.filterIndexed { i, _ -> checked[i] }
++                            if (selected.isNotEmpty()) showActionDialog(ctx, selected)
++                        }
++                        .setNegativeButton("Cancel", null)
++                        .show()
++                }
++            }
 +        }
 +
 +        private fun showActionDialog(ctx: Context, selected: List<String>) {
 +            val count = selected.size
 +            alertBuilder(ctx)
 +                .setTitle("$count app${if (count == 1) "" else "s"} selected")
-+                .setItems(arrayOf("Merge to Folder", "Group by User Profile", "Share", "Uninstall")) { _, which ->
++                .setItems(arrayOf("Merge to Folder", "Share", "Uninstall")) { _, which ->
 +                    when (which) {
 +                        0 -> showMergeDialog(ctx, selected)
-+                        1 -> groupByUser(ctx)
-+                        2 -> scope.launch {
++                        1 -> scope.launch {
 +                            selected.forEach { p ->
 +                                runCatching { ApkShareHelper.shareApp(ctx, p) }
 +                                    .onFailure { toast(ctx, "Share failed for $p") }
 +                            }
 +                        }
-+                        3 -> selected.forEach { p ->
++                        2 -> selected.forEach { p ->
 +                            ctx.startActivity(Intent(Intent.ACTION_UNINSTALL_PACKAGE).apply {
 +                                data = Uri.parse("package:$p")
 +                                putExtra(Intent.EXTRA_RETURN_RESULT, true)
@@ -511,35 +597,6 @@ index 0000000..a3f9c12
 +                    }
 +                }
 +                .show()
-+        }
-+
-+        /**
-+         * Fix: creates one DrawerFolder per secondary user / work-profile.
-+         * Each folder is named "user <id>" and is populated with all packages
-+         * reported by `pm list packages --user <id>` (requires root).
-+         */
-+        private fun groupByUser(ctx: Context) {
-+            val users = MultiUserHelper.getSecondaryUsers(ctx)
-+            if (users.isEmpty()) {
-+                toast(ctx, "No secondary users / work profiles found")
-+                return
-+            }
-+            scope.launch {
-+                var created = 0
-+                users.forEach { user ->
-+                    val apps = MultiUserHelper.getAppsForUser(user.id)
-+                        .filter { it.isNotBlank() }
-+                    if (apps.isNotEmpty()) {
-+                        DrawerFolderHelper.createFolder(ctx, user.name, apps)
-+                        created++
-+                    }
-+                }
-+                toast(
-+                    ctx,
-+                    if (created > 0) "Created $created folder(s) for user profiles"
-+                    else "No apps found for user profiles (root may be required)"
-+                )
-+            }
 +        }
 +
 +        private fun showMergeDialog(ctx: Context, selected: List<String>) {
@@ -591,10 +648,10 @@ index 0000000..a3f9c12
 
 diff --git a/res/values/mods_strings.xml b/res/values/mods_strings.xml
 new file mode 100644
-index 0000000..2f4e2b6
+index 0000000..4a8c3b0
 --- /dev/null
 +++ b/res/values/mods_strings.xml
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,10 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<resources>
 +    <string name="mods_advanced_permissions">Advanced Permissions</string>
@@ -603,6 +660,7 @@ index 0000000..2f4e2b6
 +    <string name="mods_show_data_dir">Show Data Dir</string>
 +    <string name="mods_show_app_dir">Show App Dir</string>
 +    <string name="mods_select">Select</string>
++    <string name="mods_group_by_user">Group by User Profile</string>
 +</resources>
 
 diff --git a/res/xml/mods_provider_paths.xml b/res/xml/mods_provider_paths.xml
@@ -617,7 +675,7 @@ index 0000000..493bf9a
 +</paths>
 
 diff --git a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
-index 9c30045..d8180fa 100644
+index 9c30045..e1b2fa2 100644
 --- a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
 +++ b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
 @@ -43,6 +43,7 @@
@@ -628,7 +686,7 @@ index 9c30045..d8180fa 100644
  import app.lawnchair.util.getThemedIconPacksInstalled
  import app.lawnchair.util.unsafeLazy
  import com.android.launcher3.AbstractFloatingView
-@@ -203,6 +204,18 @@
+@@ -203,6 +204,19 @@
      }
  
      override fun getSupportedShortcuts(): Stream<SystemShortcut.Factory<*>> =
@@ -643,6 +701,7 @@ index 9c30045..d8180fa 100644
 +                ModsShortcuts.INSTALL_TO_USER,
 +                ModsShortcuts.SHOW_DATA_DIR,
 +                ModsShortcuts.SHOW_APP_DIR,
++                ModsShortcuts.GROUP_BY_USER,
 +                ModsShortcuts.SELECT,
 +            ),
 +        )

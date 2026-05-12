@@ -7,7 +7,7 @@
     <string name="show_data_dir_label">Show Data Directory</string>
     <string name="show_app_dir_label">Show App Directory</string>
     <string name="select_label">Select</string>
-    
+    <string name="notification_dots_service_title">Notification Dots Service</string>
     <!-- Share App -->
     <string name="share_app_chooser_title">Share App</string>
     

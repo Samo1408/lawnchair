@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/action_create_folder"
+        android:title="@string/create_folder"
+        android:icon="@drawable/ic_folder"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/action_share"
+        android:title="@string/share"
+        android:icon="@drawable/ic_share"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/action_uninstall"
+        android:title="@string/uninstall"
+        android:icon="@drawable/ic_uninstall_no_shadow"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/action_select_all"
+        android:title="Select All"
+        app:showAsAction="never" />
+
+</menu>

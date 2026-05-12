@@ -1,0 +1,1203 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Lawnchair Mods <mods@lawnchair>
+Date: Mon, 12 May 2026 00:00:00 +0000
+Subject: [PATCH] Add Lawnchair modifications: multi-user, root utils, long-press menu
+
+Adds:
+ - RootCommandHelper / RootExplorerHelper (root shell + file manager)
+ - ApkShareHelper (base APK share, split-APK merge to .apks)
+ - MultiUserHelper (pm install-existing --user)
+ - AdvancedPermissionsHelper (appops grants)
+ - AppLongPressMenuExtension + AppSelectionManager
+ - AppSelectionBottomSheet with Select All, chips, Merge/Share/Uninstall
+ - WorkTabUserFolder + AppDrawerFolderSupport
+ - FileProvider path config and manifest additions
+---
+ 15 files changed, 1064 insertions(+)
+ create mode 100644 app/src/main/AndroidManifest_additions.xml
+ create mode 100644 app/src/main/java/app/lawnchair/mods/apk/ApkShareHelper.kt
+ create mode 100644 app/src/main/java/app/lawnchair/mods/drawer/AppDrawerFolderSupport.kt
+ create mode 100644 app/src/main/java/app/lawnchair/mods/drawer/WorkTabUserFolder.kt
+ create mode 100644 app/src/main/java/app/lawnchair/mods/menu/AppLongPressMenuExtension.kt
+ create mode 100644 app/src/main/java/app/lawnchair/mods/menu/AppSelectionBottomSheet.kt
+ create mode 100644 app/src/main/java/app/lawnchair/mods/menu/AppSelectionManager.kt
+ create mode 100644 app/src/main/java/app/lawnchair/mods/multiuser/MultiUserHelper.kt
+ create mode 100644 app/src/main/java/app/lawnchair/mods/permissions/AdvancedPermissionsHelper.kt
+ create mode 100644 app/src/main/java/app/lawnchair/mods/root/RootCommandHelper.kt
+ create mode 100644 app/src/main/java/app/lawnchair/mods/root/RootExplorerHelper.kt
+ create mode 100644 app/src/main/res/drawable/drag_handle_background.xml
+ create mode 100644 app/src/main/res/layout/bottom_sheet_app_selection.xml
+ create mode 100644 app/src/main/res/layout/dialog_create_folder.xml
+ create mode 100644 app/src/main/res/xml/file_provider_paths.xml
+
+diff --git a/app/src/main/AndroidManifest_additions.xml b/app/src/main/AndroidManifest_additions.xml
+new file mode 100644
+index 0000000..e15d5a2
+--- /dev/null
++++ b/app/src/main/AndroidManifest_additions.xml
+@@ -0,0 +1,15 @@
++<!--
++  Add these entries inside the <application> block of Lawnchair's AndroidManifest.xml.
++  Do NOT copy this file verbatim — merge each element into the existing manifest.
++-->
++
++<!-- FileProvider for APK sharing -->
++<provider
++    android:name="androidx.core.content.FileProvider"
++    android:authorities="${applicationId}.mods.fileprovider"
++    android:exported="false"
++    android:grantUriPermissions="true">
++    <meta-data
++        android:name="android.support.FILE_PROVIDER_PATHS"
++        android:resource="@xml/file_provider_paths" />
++</provider>
+
+diff --git a/app/src/main/java/app/lawnchair/mods/apk/ApkShareHelper.kt b/app/src/main/java/app/lawnchair/mods/apk/ApkShareHelper.kt
+new file mode 100644
+index 0000000..06365a2
+--- /dev/null
++++ b/app/src/main/java/app/lawnchair/mods/apk/ApkShareHelper.kt
+@@ -0,0 +1,77 @@
++package app.lawnchair.mods.apk
++
++import android.content.Context
++import android.content.Intent
++import android.content.pm.ApplicationInfo
++import android.content.pm.PackageManager
++import androidx.core.content.FileProvider
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import java.io.File
++import java.io.FileInputStream
++import java.io.FileOutputStream
++import java.util.zip.ZipEntry
++import java.util.zip.ZipOutputStream
++
++object ApkShareHelper {
++
++    suspend fun shareApp(context: Context, packageName: String) = withContext(Dispatchers.IO) {
++        val appInfo = context.packageManager.getApplicationInfo(packageName, 0)
++        val sourceDir = appInfo.sourceDir
++        val splitSourceDirs = appInfo.splitSourceDirs
++
++        val fileToShare: File = if (splitSourceDirs.isNullOrEmpty()) {
++            File(sourceDir)
++        } else {
++            mergeToApks(context, packageName, sourceDir, splitSourceDirs)
++        }
++
++        val uri = FileProvider.getUriForFile(
++            context,
++            "${context.packageName}.mods.fileprovider",
++            fileToShare
++        )
++
++        val intent = Intent(Intent.ACTION_SEND).apply {
++            type = if (splitSourceDirs.isNullOrEmpty()) "application/vnd.android.package-archive"
++                   else "application/octet-stream"
++            putExtra(Intent.EXTRA_STREAM, uri)
++            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
++        }
++
++        context.startActivity(Intent.createChooser(intent, "Share ${getAppLabel(context, packageName)}").apply {
++            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        })
++    }
++
++    private suspend fun mergeToApks(
++        context: Context,
++        packageName: String,
++        baseApk: String,
++        splits: Array<String>
++    ): File = withContext(Dispatchers.IO) {
++        val outputDir = context.cacheDir.resolve("shared_apks").also { it.mkdirs() }
++        val outFile = outputDir.resolve("$packageName.apks")
++
++        ZipOutputStream(FileOutputStream(outFile)).use { zip ->
++            val allApks = listOf(File(baseApk)) + splits.map { File(it) }
++            for (apk in allApks) {
++                zip.putNextEntry(ZipEntry(apk.name))
++                FileInputStream(apk).copyTo(zip)
++                zip.closeEntry()
++            }
++        }
++
++        outFile
++    }
++
++    private fun getAppLabel(context: Context, packageName: String): String {
++        return try {
++            val pm = context.packageManager
++            val appInfo = pm.getApplicationInfo(packageName, 0)
++            pm.getApplicationLabel(appInfo).toString()
++        } catch (e: PackageManager.NameNotFoundException) {
++            packageName
++        }
++    }
++}
+
+diff --git a/app/src/main/java/app/lawnchair/mods/drawer/AppDrawerFolderSupport.kt b/app/src/main/java/app/lawnchair/mods/drawer/AppDrawerFolderSupport.kt
+new file mode 100644
+index 0000000..88ddd5b
+--- /dev/null
++++ b/app/src/main/java/app/lawnchair/mods/drawer/AppDrawerFolderSupport.kt
+@@ -0,0 +1,88 @@
++package app.lawnchair.mods.drawer
++
++import android.content.Context
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import org.json.JSONArray
++import org.json.JSONObject
++import java.io.File
++
++data class DrawerFolder(
++    val id: String,
++    val name: String,
++    val apps: MutableList<String> = mutableListOf()
++)
++
++object AppDrawerFolderSupport {
++
++    private const val FOLDERS_FILE = "drawer_folders.json"
++
++    private fun foldersFile(context: Context): File =
++        File(context.filesDir, FOLDERS_FILE)
++
++    suspend fun loadFolders(context: Context): List<DrawerFolder> = withContext(Dispatchers.IO) {
++        val file = foldersFile(context)
++        if (!file.exists()) return@withContext emptyList()
++        val json = JSONArray(file.readText())
++        (0 until json.length()).map { i ->
++            val obj = json.getJSONObject(i)
++            val apps = obj.getJSONArray("apps")
++            DrawerFolder(
++                id = obj.getString("id"),
++                name = obj.getString("name"),
++                apps = (0 until apps.length()).map { apps.getString(it) }.toMutableList()
++            )
++        }
++    }
++
++    suspend fun saveFolders(context: Context, folders: List<DrawerFolder>) = withContext(Dispatchers.IO) {
++        val json = JSONArray()
++        for (folder in folders) {
++            val obj = JSONObject().apply {
++                put("id", folder.id)
++                put("name", folder.name)
++                val apps = JSONArray()
++                folder.apps.forEach { apps.put(it) }
++                put("apps", apps)
++            }
++            json.put(obj)
++        }
++        foldersFile(context).writeText(json.toString())
++    }
++
++    suspend fun createFolder(context: Context, name: String): DrawerFolder {
++        val folders = loadFolders(context).toMutableList()
++        val folder = DrawerFolder(
++            id = "folder_${System.currentTimeMillis()}",
++            name = name
++        )
++        folders.add(folder)
++        saveFolders(context, folders)
++        return folder
++    }
++
++    suspend fun addAppsToFolder(context: Context, folderId: String, packageNames: List<String>) {
++        val folders = loadFolders(context).toMutableList()
++        val index = folders.indexOfFirst { it.id == folderId }
++        if (index == -1) return
++        val folder = folders[index]
++        packageNames.forEach { pkg ->
++            if (pkg !in folder.apps) folder.apps.add(pkg)
++        }
++        folders[index] = folder
++        saveFolders(context, folders)
++    }
++
++    suspend fun removeFolder(context: Context, folderId: String) {
++        val folders = loadFolders(context).filter { it.id != folderId }
++        saveFolders(context, folders)
++    }
++
++    suspend fun renameFolder(context: Context, folderId: String, newName: String) {
++        val folders = loadFolders(context).toMutableList()
++        val index = folders.indexOfFirst { it.id == folderId }
++        if (index == -1) return
++        folders[index] = folders[index].copy(name = newName)
++        saveFolders(context, folders)
++    }
++}
+
+diff --git a/app/src/main/java/app/lawnchair/mods/drawer/WorkTabUserFolder.kt b/app/src/main/java/app/lawnchair/mods/drawer/WorkTabUserFolder.kt
+new file mode 100644
+index 0000000..7fbf373
+--- /dev/null
++++ b/app/src/main/java/app/lawnchair/mods/drawer/WorkTabUserFolder.kt
+@@ -0,0 +1,59 @@
++package app.lawnchair.mods.drawer
++
++import android.content.Context
++import android.content.pm.LauncherApps
++import android.content.pm.PackageManager
++import android.os.UserHandle
++import android.os.UserManager
++import app.lawnchair.mods.multiuser.UserProfile
++
++data class AppEntry(
++    val packageName: String,
++    val label: String,
++    val userHandle: UserHandle
++)
++
++data class UserFolder(
++    val profile: UserProfile,
++    val apps: List<AppEntry>
++)
++
++object WorkTabUserFolder {
++
++    fun buildWorkFolders(context: Context): List<UserFolder> {
++        val um = context.getSystemService(Context.USER_SERVICE) as UserManager
++        val la = context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
++        val pm = context.packageManager
++
++        return um.userProfiles
++            .filter { it.identifier != 0 }
++            .map { handle ->
++                val userId = handle.identifier
++                val apps = la.getActivityList(null, handle).map { info ->
++                    AppEntry(
++                        packageName = info.applicationInfo.packageName,
++                        label = info.label.toString(),
++                        userHandle = handle
++                    )
++                }
++                UserFolder(
++                    profile = UserProfile(id = userId, name = "user $userId"),
++                    apps = apps
++                )
++            }
++    }
++
++    fun getPrimaryUserApps(context: Context): List<AppEntry> {
++        val la = context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
++        val um = context.getSystemService(Context.USER_SERVICE) as UserManager
++        val primaryHandle = um.userProfiles.first { it.identifier == 0 }
++
++        return la.getActivityList(null, primaryHandle).map { info ->
++            AppEntry(
++                packageName = info.applicationInfo.packageName,
++                label = info.label.toString(),
++                userHandle = primaryHandle
++            )
++        }
++    }
++}
+
+diff --git a/app/src/main/java/app/lawnchair/mods/menu/AppLongPressMenuExtension.kt b/app/src/main/java/app/lawnchair/mods/menu/AppLongPressMenuExtension.kt
+new file mode 100644
+index 0000000..d302910
+--- /dev/null
++++ b/app/src/main/java/app/lawnchair/mods/menu/AppLongPressMenuExtension.kt
+@@ -0,0 +1,108 @@
++package app.lawnchair.mods.menu
++
++import android.content.Context
++import android.view.LayoutInflater
++import android.widget.Toast
++import androidx.appcompat.app.AlertDialog
++import app.lawnchair.mods.apk.ApkShareHelper
++import app.lawnchair.mods.multiuser.MultiUserHelper
++import app.lawnchair.mods.permissions.AdvancedPermissionsHelper
++import app.lawnchair.mods.root.RootCommandHelper
++import app.lawnchair.mods.root.RootExplorerHelper
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++
++data class AppMenuItem(val label: String, val action: suspend () -> Unit)
++
++class AppLongPressMenuExtension(
++    private val context: Context,
++    private val packageName: String,
++    private val scope: CoroutineScope
++) {
++
++    fun buildMenuItems(): List<AppMenuItem> = listOf(
++        AppMenuItem("Advanced Permissions") { showAdvancedPermissionsDialog() },
++        AppMenuItem("Share App") { shareApp() },
++        AppMenuItem("Install to Another User") { showInstallToUserDialog() },
++        AppMenuItem("Show Data Dir") { showDataDir() },
++        AppMenuItem("Show App Dir") { showAppDir() },
++        AppMenuItem("Select") { onSelectRequested() }
++    )
++
++    private suspend fun showAdvancedPermissionsDialog() = withContext(Dispatchers.Main) {
++        val options = arrayOf(
++            "Grant Usage Stats",
++            "Grant Access All Files",
++            "Grant Install Unknown Sources",
++            "Grant All"
++        )
++        AlertDialog.Builder(context)
++            .setTitle("Advanced Permissions")
++            .setItems(options) { _, which ->
++                scope.launch {
++                    val results = when (which) {
++                        0 -> listOf(AdvancedPermissionsHelper.grantUsageStats(packageName))
++                        1 -> listOf(AdvancedPermissionsHelper.grantAllFiles(packageName))
++                        2 -> listOf(AdvancedPermissionsHelper.grantInstallUnknownSources(packageName))
++                        else -> AdvancedPermissionsHelper.grantAll(packageName)
++                    }
++                    val allOk = results.all { it.success }
++                    toast(if (allOk) "Permissions granted" else "Failed: ${results.firstOrNull { !it.success }?.error}")
++                }
++            }
++            .show()
++    }
++
++    private suspend fun shareApp() {
++        try {
++            ApkShareHelper.shareApp(context, packageName)
++        } catch (e: Exception) {
++            withContext(Dispatchers.Main) { toast("Share failed: ${e.message}") }
++        }
++    }
++
++    private suspend fun showInstallToUserDialog() = withContext(Dispatchers.Main) {
++        val users = MultiUserHelper.getSecondaryUsers(context)
++        if (users.isEmpty()) {
++            toast("No secondary users found")
++            return@withContext
++        }
++        val labels = users.map { it.name }.toTypedArray()
++        AlertDialog.Builder(context)
++            .setTitle("Install to User")
++            .setItems(labels) { _, which ->
++                val user = users[which]
++                scope.launch {
++                    val result = MultiUserHelper.installToUser(packageName, user.id)
++                    withContext(Dispatchers.Main) {
++                        toast(if (result.success) "Installed to ${user.name}" else "Failed: ${result.error}")
++                    }
++                }
++            }
++            .show()
++    }
++
++    private fun showDataDir() {
++        try {
++            RootExplorerHelper.openDataDir(context, packageName)
++        } catch (e: Exception) {
++            toast("Error: ${e.message}")
++        }
++    }
++
++    private fun showAppDir() {
++        try {
++            RootExplorerHelper.openAppDir(context, packageName)
++        } catch (e: Exception) {
++            toast("Error: ${e.message}")
++        }
++    }
++
++    var onSelectRequested: suspend () -> Unit = {}
++
++    private fun toast(msg: String) {
++        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
++    }
++}
+
+diff --git a/app/src/main/java/app/lawnchair/mods/menu/AppSelectionBottomSheet.kt b/app/src/main/java/app/lawnchair/mods/menu/AppSelectionBottomSheet.kt
+new file mode 100644
+index 0000000..599f973
+--- /dev/null
++++ b/app/src/main/java/app/lawnchair/mods/menu/AppSelectionBottomSheet.kt
+@@ -0,0 +1,237 @@
++package app.lawnchair.mods.menu
++
++import android.app.Dialog
++import android.content.Intent
++import android.content.pm.PackageManager
++import android.net.Uri
++import android.os.Bundle
++import android.view.LayoutInflater
++import android.view.View
++import android.view.ViewGroup
++import android.widget.CheckBox
++import android.widget.TextView
++import android.widget.Toast
++import androidx.appcompat.app.AlertDialog
++import androidx.fragment.app.FragmentManager
++import androidx.lifecycle.lifecycleScope
++import app.lawnchair.mods.R
++import app.lawnchair.mods.drawer.AppDrawerFolderSupport
++import com.google.android.material.bottomsheet.BottomSheetBehavior
++import com.google.android.material.bottomsheet.BottomSheetDialog
++import com.google.android.material.bottomsheet.BottomSheetDialogFragment
++import com.google.android.material.chip.Chip
++import com.google.android.material.chip.ChipGroup
++import com.google.android.material.textfield.TextInputEditText
++import kotlinx.coroutines.launch
++
++class AppSelectionBottomSheet : BottomSheetDialogFragment() {
++
++    private lateinit var selectionManager: AppSelectionManager
++
++    /** Full list of packages visible in the current drawer view — used for Select All. */
++    private var allVisiblePackages: List<String> = emptyList()
++
++    companion object {
++        private const val TAG = "AppSelectionBottomSheet"
++
++        fun show(
++            fragmentManager: FragmentManager,
++            selectionManager: AppSelectionManager,
++            allVisiblePackages: List<String> = emptyList()
++        ): AppSelectionBottomSheet {
++            val sheet = AppSelectionBottomSheet()
++            sheet.selectionManager = selectionManager
++            sheet.allVisiblePackages = allVisiblePackages
++            sheet.show(fragmentManager, TAG)
++            return sheet
++        }
++    }
++
++    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
++        return BottomSheetDialog(requireContext(), theme).apply {
++            behavior.state = BottomSheetBehavior.STATE_EXPANDED
++            behavior.skipCollapsed = false
++        }
++    }
++
++    override fun onCreateView(
++        inflater: LayoutInflater,
++        container: ViewGroup?,
++        savedInstanceState: Bundle?
++    ): View = inflater.inflate(R.layout.bottom_sheet_app_selection, container, false)
++
++    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
++        super.onViewCreated(view, savedInstanceState)
++
++        val tvCount = view.findViewById<TextView>(R.id.tvSelectionCount)
++        val chipGroup = view.findViewById<ChipGroup>(R.id.chipGroupSelectedApps)
++        val checkSelectAll = view.findViewById<CheckBox>(R.id.checkSelectAll)
++        val btnClear = view.findViewById<View>(R.id.btnClearSelection)
++        val actionMerge = view.findViewById<View>(R.id.actionMergeToFolder)
++        val actionShare = view.findViewById<View>(R.id.actionShare)
++        val actionUninstall = view.findViewById<View>(R.id.actionUninstall)
++
++        renderChips(chipGroup, tvCount, checkSelectAll)
++
++        checkSelectAll.setOnCheckedChangeListener { _, isChecked ->
++            if (isChecked) {
++                selectionManager.selectAll(allVisiblePackages)
++            } else {
++                selectionManager.clear()
++                if (selectionManager.selectedPackages.isEmpty()) {
++                    dismiss()
++                    return@setOnCheckedChangeListener
++                }
++            }
++            renderChips(chipGroup, tvCount, checkSelectAll)
++        }
++
++        btnClear.setOnClickListener {
++            selectionManager.clear()
++            dismiss()
++        }
++
++        actionMerge.setOnClickListener { showMergeToFolderDialog() }
++
++        actionShare.setOnClickListener {
++            selectionManager.shareSelected()
++            dismiss()
++        }
++
++        actionUninstall.setOnClickListener { confirmUninstall() }
++    }
++
++    private fun renderChips(chipGroup: ChipGroup, tvCount: TextView, checkSelectAll: CheckBox) {
++        chipGroup.removeAllViews()
++        val selected = selectionManager.selectedPackages
++
++        tvCount.text = "${selected.size} selected"
++
++        val allSelected = allVisiblePackages.isNotEmpty() &&
++                allVisiblePackages.all { it in selected }
++        val someSelected = !allSelected && selected.isNotEmpty()
++
++        // Update checkbox without re-triggering the listener
++        checkSelectAll.setOnCheckedChangeListener(null)
++        checkSelectAll.isChecked = allSelected
++        checkSelectAll.alpha = if (someSelected) 0.5f else 1f   // dim when partial
++        checkSelectAll.setOnCheckedChangeListener { _, isChecked ->
++            if (isChecked) {
++                selectionManager.selectAll(allVisiblePackages)
++            } else {
++                selectionManager.clear()
++                if (selectionManager.selectedPackages.isEmpty()) {
++                    dismiss()
++                    return@setOnCheckedChangeListener
++                }
++            }
++            renderChips(chipGroup, tvCount, checkSelectAll)
++        }
++
++        val pm = requireContext().packageManager
++        for (pkg in selected) {
++            val label = try {
++                pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
++            } catch (e: PackageManager.NameNotFoundException) {
++                pkg
++            }
++
++            val chip = Chip(requireContext()).apply {
++                text = label
++                isCloseIconVisible = true
++                setOnCloseIconClickListener {
++                    selectionManager.toggle(pkg)
++                    if (selectionManager.selectedPackages.isEmpty()) {
++                        dismiss()
++                    } else {
++                        renderChips(chipGroup, tvCount, checkSelectAll)
++                    }
++                }
++            }
++            chipGroup.addView(chip)
++        }
++    }
++
++    private fun showMergeToFolderDialog() {
++        val ctx = requireContext()
++        lifecycleScope.launch {
++            val existing = AppDrawerFolderSupport.loadFolders(ctx)
++            val options = mutableListOf("+ Create new folder") + existing.map { it.name }
++
++            AlertDialog.Builder(ctx)
++                .setTitle("Merge to Folder")
++                .setItems(options.toTypedArray()) { _, which ->
++                    if (which == 0) {
++                        showCreateFolderDialog()
++                    } else {
++                        val folder = existing[which - 1]
++                        lifecycleScope.launch {
++                            AppDrawerFolderSupport.addAppsToFolder(
++                                ctx,
++                                folder.id,
++                                selectionManager.selectedPackages.toList()
++                            )
++                            selectionManager.clear()
++                            toast("Added to \"${folder.name}\"")
++                            dismiss()
++                        }
++                    }
++                }
++                .show()
++        }
++    }
++
++    private fun showCreateFolderDialog() {
++        val ctx = requireContext()
++        val dialogView = layoutInflater.inflate(R.layout.dialog_create_folder, null)
++        val input = dialogView.findViewById<TextInputEditText>(R.id.folderNameInput)
++
++        AlertDialog.Builder(ctx)
++            .setTitle("New Folder")
++            .setView(dialogView)
++            .setPositiveButton("Create") { _, _ ->
++                val name = input.text?.toString()?.trim()
++                if (name.isNullOrEmpty()) {
++                    toast("Folder name cannot be empty")
++                    return@setPositiveButton
++                }
++                lifecycleScope.launch {
++                    val folder = AppDrawerFolderSupport.createFolder(ctx, name)
++                    AppDrawerFolderSupport.addAppsToFolder(
++                        ctx,
++                        folder.id,
++                        selectionManager.selectedPackages.toList()
++                    )
++                    selectionManager.clear()
++                    toast("Folder \"$name\" created")
++                    dismiss()
++                }
++            }
++            .setNegativeButton("Cancel", null)
++            .show()
++    }
++
++    private fun confirmUninstall() {
++        val ctx = requireContext()
++        val count = selectionManager.selectedPackages.size
++        AlertDialog.Builder(ctx)
++            .setTitle("Uninstall $count app${if (count == 1) "" else "s"}?")
++            .setMessage("This will remove the selected apps from the device.")
++            .setPositiveButton("Uninstall") { _, _ ->
++                selectionManager.uninstallSelected { pkg ->
++                    val intent = Intent(Intent.ACTION_UNINSTALL_PACKAGE).apply {
++                        data = Uri.parse("package:$pkg")
++                        putExtra(Intent.EXTRA_RETURN_RESULT, true)
++                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++                    }
++                    ctx.startActivity(intent)
++                }
++                dismiss()
++            }
++            .setNegativeButton("Cancel", null)
++            .show()
++    }
++
++    private fun toast(msg: String) =
++        Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show()
++}
+
+diff --git a/app/src/main/java/app/lawnchair/mods/menu/AppSelectionManager.kt b/app/src/main/java/app/lawnchair/mods/menu/AppSelectionManager.kt
+new file mode 100644
+index 0000000..009d2fb
+--- /dev/null
++++ b/app/src/main/java/app/lawnchair/mods/menu/AppSelectionManager.kt
+@@ -0,0 +1,68 @@
++package app.lawnchair.mods.menu
++
++import android.content.Context
++import android.widget.Toast
++import app.lawnchair.mods.apk.ApkShareHelper
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++
++class AppSelectionManager(
++    private val context: Context,
++    private val scope: CoroutineScope
++) {
++
++    private val _selectedPackages = mutableSetOf<String>()
++    val selectedPackages: Set<String> get() = _selectedPackages
++
++    val isActive get() = _selectedPackages.isNotEmpty()
++
++    fun toggle(packageName: String): Boolean {
++        return if (packageName in _selectedPackages) {
++            _selectedPackages.remove(packageName)
++            false
++        } else {
++            _selectedPackages.add(packageName)
++            true
++        }
++    }
++
++    fun isSelected(packageName: String) = packageName in _selectedPackages
++
++    fun clear() = _selectedPackages.clear()
++
++    fun selectAll(packages: List<String>) {
++        _selectedPackages.addAll(packages)
++    }
++
++    fun shareSelected() {
++        val packages = _selectedPackages.toList()
++        scope.launch {
++            for (pkg in packages) {
++                try {
++                    ApkShareHelper.shareApp(context, pkg)
++                } catch (e: Exception) {
++                    withContext(Dispatchers.Main) {
++                        Toast.makeText(context, "Failed to share $pkg: ${e.message}", Toast.LENGTH_SHORT).show()
++                    }
++                }
++            }
++        }
++    }
++
++    fun uninstallSelected(onUninstall: (String) -> Unit) {
++        val packages = _selectedPackages.toList()
++        for (pkg in packages) {
++            onUninstall(pkg)
++        }
++        clear()
++    }
++
++    var onMergeToFolder: ((Set<String>) -> Unit)? = null
++
++    fun mergeSelectedToFolder() {
++        onMergeToFolder?.invoke(_selectedPackages.toSet())
++        clear()
++    }
++}
+
+diff --git a/app/src/main/java/app/lawnchair/mods/multiuser/MultiUserHelper.kt b/app/src/main/java/app/lawnchair/mods/multiuser/MultiUserHelper.kt
+new file mode 100644
+index 0000000..f020944
+--- /dev/null
++++ b/app/src/main/java/app/lawnchair/mods/multiuser/MultiUserHelper.kt
+@@ -0,0 +1,44 @@
++package app.lawnchair.mods.multiuser
++
++import android.content.Context
++import android.os.UserHandle
++import android.os.UserManager
++import app.lawnchair.mods.root.RootCommandHelper
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++
++data class UserProfile(val id: Int, val name: String)
++
++object MultiUserHelper {
++
++    fun getSecondaryUsers(context: Context): List<UserProfile> {
++        val um = context.getSystemService(Context.USER_SERVICE) as UserManager
++        return um.userProfiles
++            .mapNotNull { handle ->
++                val userId = handle.identifier
++                if (userId == 0) null
++                else UserProfile(
++                    id = userId,
++                    name = "user $userId"
++                )
++            }
++    }
++
++    suspend fun installToUser(packageName: String, userId: Int): RootCommandHelper.RootResult {
++        return RootCommandHelper.exec("pm install-existing --user $userId $packageName")
++    }
++
++    suspend fun getInstalledPackagesForUser(userId: Int): List<String> =
++        withContext(Dispatchers.IO) {
++            val result = RootCommandHelper.exec("pm list packages --user $userId")
++            if (!result.success) return@withContext emptyList()
++            result.output.lines()
++                .filter { it.startsWith("package:") }
++                .map { it.removePrefix("package:").trim() }
++        }
++
++    suspend fun isPackageInstalledForUser(packageName: String, userId: Int): Boolean {
++        val packages = getInstalledPackagesForUser(userId)
++        return packageName in packages
++    }
++}
+
+diff --git a/app/src/main/java/app/lawnchair/mods/permissions/AdvancedPermissionsHelper.kt b/app/src/main/java/app/lawnchair/mods/permissions/AdvancedPermissionsHelper.kt
+new file mode 100644
+index 0000000..52c24ce
+--- /dev/null
++++ b/app/src/main/java/app/lawnchair/mods/permissions/AdvancedPermissionsHelper.kt
+@@ -0,0 +1,50 @@
++package app.lawnchair.mods.permissions
++
++import app.lawnchair.mods.root.RootCommandHelper
++
++object AdvancedPermissionsHelper {
++
++    suspend fun grantUsageStats(packageName: String): RootCommandHelper.RootResult {
++        return RootCommandHelper.exec(
++            "appops set $packageName PACKAGE_USAGE_STATS allow"
++        )
++    }
++
++    suspend fun grantAllFiles(packageName: String): RootCommandHelper.RootResult {
++        return RootCommandHelper.exec(
++            "appops set $packageName MANAGE_EXTERNAL_STORAGE allow"
++        )
++    }
++
++    suspend fun grantInstallUnknownSources(packageName: String): RootCommandHelper.RootResult {
++        return RootCommandHelper.exec(
++            "appops set $packageName REQUEST_INSTALL_PACKAGES allow"
++        )
++    }
++
++    suspend fun grantAll(packageName: String): List<RootCommandHelper.RootResult> {
++        return listOf(
++            grantUsageStats(packageName),
++            grantAllFiles(packageName),
++            grantInstallUnknownSources(packageName)
++        )
++    }
++
++    suspend fun revokeUsageStats(packageName: String): RootCommandHelper.RootResult {
++        return RootCommandHelper.exec(
++            "appops set $packageName PACKAGE_USAGE_STATS deny"
++        )
++    }
++
++    suspend fun revokeAllFiles(packageName: String): RootCommandHelper.RootResult {
++        return RootCommandHelper.exec(
++            "appops set $packageName MANAGE_EXTERNAL_STORAGE deny"
++        )
++    }
++
++    suspend fun revokeInstallUnknownSources(packageName: String): RootCommandHelper.RootResult {
++        return RootCommandHelper.exec(
++            "appops set $packageName REQUEST_INSTALL_PACKAGES deny"
++        )
++    }
++}
+
+diff --git a/app/src/main/java/app/lawnchair/mods/root/RootCommandHelper.kt b/app/src/main/java/app/lawnchair/mods/root/RootCommandHelper.kt
+new file mode 100644
+index 0000000..6efcb79
+--- /dev/null
++++ b/app/src/main/java/app/lawnchair/mods/root/RootCommandHelper.kt
+@@ -0,0 +1,39 @@
++package app.lawnchair.mods.root
++
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import java.io.BufferedReader
++import java.io.InputStreamReader
++import java.io.OutputStreamWriter
++
++object RootCommandHelper {
++
++    data class RootResult(val output: String, val error: String, val exitCode: Int) {
++        val success get() = exitCode == 0
++    }
++
++    suspend fun exec(vararg commands: String): RootResult = withContext(Dispatchers.IO) {
++        try {
++            val process = Runtime.getRuntime().exec("su")
++            val writer = OutputStreamWriter(process.outputStream)
++            for (cmd in commands) {
++                writer.write("$cmd\n")
++            }
++            writer.write("exit\n")
++            writer.flush()
++            writer.close()
++
++            val output = BufferedReader(InputStreamReader(process.inputStream)).readText().trim()
++            val error = BufferedReader(InputStreamReader(process.errorStream)).readText().trim()
++            val exitCode = process.waitFor()
++            RootResult(output, error, exitCode)
++        } catch (e: Exception) {
++            RootResult("", e.message ?: "Unknown error", -1)
++        }
++    }
++
++    suspend fun isRootAvailable(): Boolean {
++        val result = exec("id")
++        return result.success && result.output.contains("uid=0")
++    }
++}
+
+diff --git a/app/src/main/java/app/lawnchair/mods/root/RootExplorerHelper.kt b/app/src/main/java/app/lawnchair/mods/root/RootExplorerHelper.kt
+new file mode 100644
+index 0000000..30e8a52
+--- /dev/null
++++ b/app/src/main/java/app/lawnchair/mods/root/RootExplorerHelper.kt
+@@ -0,0 +1,54 @@
++package app.lawnchair.mods.root
++
++import android.content.Context
++import android.content.Intent
++import android.content.pm.PackageManager
++import android.net.Uri
++
++object RootExplorerHelper {
++
++    private val SUPPORTED_EXPLORERS = listOf(
++        "com.mixplorer",
++        "com.mixplorer.silver",
++        "bin.mt.plus.canary",
++        "bin.mt.plus"
++    )
++
++    fun openPath(context: Context, path: String) {
++        val explorer = findInstalledExplorer(context)
++            ?: throw IllegalStateException("No supported root explorer installed")
++
++        val intent = Intent(Intent.ACTION_VIEW).apply {
++            setPackage(explorer)
++            data = Uri.parse("file://$path")
++            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        }
++        context.startActivity(intent)
++    }
++
++    fun openDataDir(context: Context, packageName: String) {
++        openPath(context, "/data/data/$packageName")
++    }
++
++    fun openAppDir(context: Context, packageName: String) {
++        val apkPath = context.packageManager
++            .getApplicationInfo(packageName, 0)
++            .publicSourceDir
++        openPath(context, apkPath)
++    }
++
++    fun findInstalledExplorer(context: Context): String? {
++        val pm = context.packageManager
++        return SUPPORTED_EXPLORERS.firstOrNull { pkg ->
++            try {
++                pm.getPackageInfo(pkg, 0)
++                true
++            } catch (e: PackageManager.NameNotFoundException) {
++                false
++            }
++        }
++    }
++
++    fun hasInstalledExplorer(context: Context): Boolean =
++        findInstalledExplorer(context) != null
++}
+
+diff --git a/app/src/main/res/drawable/drag_handle_background.xml b/app/src/main/res/drawable/drag_handle_background.xml
+new file mode 100644
+index 0000000..cddd9fe
+--- /dev/null
++++ b/app/src/main/res/drawable/drag_handle_background.xml
+@@ -0,0 +1,6 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <solid android:color="?attr/colorOutlineVariant" />
++    <corners android:radius="4dp" />
++</shape>
+
+diff --git a/app/src/main/res/layout/bottom_sheet_app_selection.xml b/app/src/main/res/layout/bottom_sheet_app_selection.xml
+new file mode 100644
+index 0000000..3ac73a5
+--- /dev/null
++++ b/app/src/main/res/layout/bottom_sheet_app_selection.xml
+@@ -0,0 +1,182 @@
++<?xml version="1.0" encoding="utf-8"?>
++<LinearLayout
++    xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto"
++    android:id="@+id/selectionBottomSheet"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:orientation="vertical"
++    android:paddingBottom="16dp">
++
++    <!-- Drag handle -->
++    <View
++        android:layout_width="40dp"
++        android:layout_height="4dp"
++        android:layout_gravity="center_horizontal"
++        android:layout_marginTop="8dp"
++        android:layout_marginBottom="12dp"
++        android:background="@drawable/drag_handle_background" />
++
++    <!-- Header row: title + select-all toggle + clear -->
++    <LinearLayout
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:gravity="center_vertical"
++        android:paddingHorizontal="16dp"
++        android:paddingBottom="8dp"
++        android:orientation="horizontal">
++
++        <TextView
++            android:id="@+id/tvSelectionCount"
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_weight="1"
++            android:text="0 selected"
++            android:textAppearance="?attr/textAppearanceTitleMedium" />
++
++        <CheckBox
++            android:id="@+id/checkSelectAll"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginEnd="4dp"
++            android:text="All"
++            android:textAppearance="?attr/textAppearanceLabelMedium" />
++
++        <Button
++            android:id="@+id/btnClearSelection"
++            style="@style/Widget.Material3.Button.TextButton"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:text="Clear" />
++
++    </LinearLayout>
++
++    <!-- Selected app chips -->
++    <HorizontalScrollView
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:paddingHorizontal="12dp"
++        android:scrollbars="none">
++
++        <com.google.android.material.chip.ChipGroup
++            android:id="@+id/chipGroupSelectedApps"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            app:singleLine="true" />
++
++    </HorizontalScrollView>
++
++    <!-- Divider -->
++    <View
++        android:layout_width="match_parent"
++        android:layout_height="1dp"
++        android:layout_marginHorizontal="16dp"
++        android:layout_marginTop="12dp"
++        android:layout_marginBottom="4dp"
++        android:background="?attr/colorOutlineVariant" />
++
++    <!-- Action buttons -->
++    <LinearLayout
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:orientation="horizontal"
++        android:gravity="center"
++        android:paddingHorizontal="8dp"
++        android:paddingTop="8dp">
++
++        <!-- Merge to Folder -->
++        <LinearLayout
++            android:id="@+id/actionMergeToFolder"
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_weight="1"
++            android:orientation="vertical"
++            android:gravity="center"
++            android:padding="12dp"
++            android:background="?attr/selectableItemBackground"
++            android:clickable="true"
++            android:focusable="true">
++
++            <ImageView
++                android:layout_width="32dp"
++                android:layout_height="32dp"
++                android:src="@drawable/ic_create_new_folder"
++                android:tint="?attr/colorPrimary"
++                android:contentDescription="Merge to folder" />
++
++            <TextView
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="4dp"
++                android:text="Merge to\nFolder"
++                android:gravity="center"
++                android:textAppearance="?attr/textAppearanceLabelSmall"
++                android:textColor="?attr/colorPrimary" />
++
++        </LinearLayout>
++
++        <!-- Share -->
++        <LinearLayout
++            android:id="@+id/actionShare"
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_weight="1"
++            android:orientation="vertical"
++            android:gravity="center"
++            android:padding="12dp"
++            android:background="?attr/selectableItemBackground"
++            android:clickable="true"
++            android:focusable="true">
++
++            <ImageView
++                android:layout_width="32dp"
++                android:layout_height="32dp"
++                android:src="@drawable/ic_share"
++                android:tint="?attr/colorPrimary"
++                android:contentDescription="Share apps" />
++
++            <TextView
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="4dp"
++                android:text="Share"
++                android:gravity="center"
++                android:textAppearance="?attr/textAppearanceLabelSmall"
++                android:textColor="?attr/colorPrimary" />
++
++        </LinearLayout>
++
++        <!-- Uninstall -->
++        <LinearLayout
++            android:id="@+id/actionUninstall"
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_weight="1"
++            android:orientation="vertical"
++            android:gravity="center"
++            android:padding="12dp"
++            android:background="?attr/selectableItemBackground"
++            android:clickable="true"
++            android:focusable="true">
++
++            <ImageView
++                android:layout_width="32dp"
++                android:layout_height="32dp"
++                android:src="@drawable/ic_delete"
++                android:tint="@color/error"
++                android:contentDescription="Uninstall apps" />
++
++            <TextView
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="4dp"
++                android:text="Uninstall"
++                android:gravity="center"
++                android:textAppearance="?attr/textAppearanceLabelSmall"
++                android:textColor="@color/error" />
++
++        </LinearLayout>
++
++    </LinearLayout>
++
++</LinearLayout>
+
+diff --git a/app/src/main/res/layout/dialog_create_folder.xml b/app/src/main/res/layout/dialog_create_folder.xml
+new file mode 100644
+index 0000000..19e7c17
+--- /dev/null
++++ b/app/src/main/res/layout/dialog_create_folder.xml
+@@ -0,0 +1,33 @@
++<?xml version="1.0" encoding="utf-8"?>
++<LinearLayout
++    xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:orientation="vertical"
++    android:padding="24dp">
++
++    <TextView
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:text="New Folder Name"
++        android:textAppearance="?attr/textAppearanceTitleMedium"
++        android:layout_marginBottom="16dp" />
++
++    <com.google.android.material.textfield.TextInputLayout
++        android:id="@+id/folderNameLayout"
++        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:hint="Folder name">
++
++        <com.google.android.material.textfield.TextInputEditText
++            android:id="@+id/folderNameInput"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:inputType="text"
++            android:maxLines="1"
++            android:imeOptions="actionDone" />
++
++    </com.google.android.material.textfield.TextInputLayout>
++
++</LinearLayout>
+
+diff --git a/app/src/main/res/xml/file_provider_paths.xml b/app/src/main/res/xml/file_provider_paths.xml
+new file mode 100644
+index 0000000..017db01
+--- /dev/null
++++ b/app/src/main/res/xml/file_provider_paths.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<paths>
++    <cache-path name="shared_apks" path="shared_apks/" />
++</paths>
+
+--
+2.43.0

@@ -426,7 +426,7 @@ index 0000000..a3f9c12
 +    private class ShowDataDirShortcut(
 +        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
 +    ) : SystemShortcut<Launcher>(R.drawable.ic_info_no_shadow, R.string.mods_show_data_dir, launcher, itemInfo, view) {
-
++
 +        override fun onClick(v: View) {
 +            runCatching { RootExplorerHelper.openDataDir(mTarget, pkg) }
 +                .onFailure { toast(mTarget, "Error: ${it.message}") }

@@ -1,69 +1,54 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Lawnchair Mods <mods@lawnchair>
+From: Lawnchair Mods v2 <mods@lawnchair>
 Date: Mon, 12 May 2026 00:00:00 +0000
-Subject: [PATCH] Add Lawnchair modifications: multi-user, root utils, long-press menu
+Subject: [PATCH] Add mod shortcuts to Lawnchair long-press menu
 
-Adds:
- - RootCommandHelper / RootExplorerHelper (root shell + file manager)
- - ApkShareHelper (base APK share, split-APK merge to .apks)
- - MultiUserHelper (pm install-existing --user)
- - AdvancedPermissionsHelper (appops grants)
- - AppLongPressMenuExtension + AppSelectionManager
- - AppSelectionBottomSheet with Select All, chips, Merge/Share/Uninstall
- - WorkTabUserFolder + AppDrawerFolderSupport
- - FileProvider path config and manifest additions
+Adds 6 new SystemShortcut factories registered in LawnchairLauncher:
+  - Advanced Permissions (appops via su)
+  - Share App (base APK or merged .apks)
+  - Install to Another User (pm install-existing)
+  - Show Data Dir (open /data/data/<pkg> in MiXplorer/MT Manager)
+  - Show App Dir (open APK install path in file manager)
+  - Select (multi-select with Merge/Share/Uninstall)
 ---
- 15 files changed, 1064 insertions(+)
- create mode 100644 app/src/main/AndroidManifest_additions.xml
- create mode 100644 app/src/main/java/app/lawnchair/mods/apk/ApkShareHelper.kt
- create mode 100644 app/src/main/java/app/lawnchair/mods/drawer/AppDrawerFolderSupport.kt
- create mode 100644 app/src/main/java/app/lawnchair/mods/drawer/WorkTabUserFolder.kt
- create mode 100644 app/src/main/java/app/lawnchair/mods/menu/AppLongPressMenuExtension.kt
- create mode 100644 app/src/main/java/app/lawnchair/mods/menu/AppSelectionBottomSheet.kt
- create mode 100644 app/src/main/java/app/lawnchair/mods/menu/AppSelectionManager.kt
- create mode 100644 app/src/main/java/app/lawnchair/mods/multiuser/MultiUserHelper.kt
- create mode 100644 app/src/main/java/app/lawnchair/mods/permissions/AdvancedPermissionsHelper.kt
- create mode 100644 app/src/main/java/app/lawnchair/mods/root/RootCommandHelper.kt
- create mode 100644 app/src/main/java/app/lawnchair/mods/root/RootExplorerHelper.kt
- create mode 100644 app/src/main/res/drawable/drag_handle_background.xml
- create mode 100644 app/src/main/res/layout/bottom_sheet_app_selection.xml
- create mode 100644 app/src/main/res/layout/dialog_create_folder.xml
- create mode 100644 app/src/main/res/xml/file_provider_paths.xml
+ 10 files changed
 
-diff --git a/app/src/main/AndroidManifest_additions.xml b/app/src/main/AndroidManifest_additions.xml
+diff --git a/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt b/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt
 new file mode 100644
-index 0000000..e15d5a2
+index 0000000..fb85d43
 --- /dev/null
-+++ b/app/src/main/AndroidManifest_additions.xml
-@@ -0,0 +1,15 @@
-+<!--
-+  Add these entries inside the <application> block of Lawnchair's AndroidManifest.xml.
-+  Do NOT copy this file verbatim — merge each element into the existing manifest.
-+-->
++++ b/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt
+@@ -0,0 +1,19 @@
++package app.lawnchair.mods
 +
-+<!-- FileProvider for APK sharing -->
-+<provider
-+    android:name="androidx.core.content.FileProvider"
-+    android:authorities="${applicationId}.mods.fileprovider"
-+    android:exported="false"
-+    android:grantUriPermissions="true">
-+    <meta-data
-+        android:name="android.support.FILE_PROVIDER_PATHS"
-+        android:resource="@xml/file_provider_paths" />
-+</provider>
++object AdvancedPermissionsHelper {
++
++    suspend fun grantUsageStats(pkg: String) =
++        RootCommandHelper.exec("appops set $pkg PACKAGE_USAGE_STATS allow")
++
++    suspend fun grantAllFiles(pkg: String) =
++        RootCommandHelper.exec("appops set $pkg MANAGE_EXTERNAL_STORAGE allow")
++
++    suspend fun grantUnknownSources(pkg: String) =
++        RootCommandHelper.exec("appops set $pkg REQUEST_INSTALL_PACKAGES allow")
++
++    suspend fun grantAll(pkg: String) = listOf(
++        grantUsageStats(pkg),
++        grantAllFiles(pkg),
++        grantUnknownSources(pkg),
++    )
++}
 
-diff --git a/app/src/main/java/app/lawnchair/mods/apk/ApkShareHelper.kt b/app/src/main/java/app/lawnchair/mods/apk/ApkShareHelper.kt
+diff --git a/lawnchair/src/app/lawnchair/mods/ApkShareHelper.kt b/lawnchair/src/app/lawnchair/mods/ApkShareHelper.kt
 new file mode 100644
-index 0000000..06365a2
+index 0000000..70ac07c
 --- /dev/null
-+++ b/app/src/main/java/app/lawnchair/mods/apk/ApkShareHelper.kt
-@@ -0,0 +1,77 @@
-+package app.lawnchair.mods.apk
++++ b/lawnchair/src/app/lawnchair/mods/ApkShareHelper.kt
+@@ -0,0 +1,54 @@
++package app.lawnchair.mods
 +
 +import android.content.Context
 +import android.content.Intent
-+import android.content.pm.ApplicationInfo
-+import android.content.pm.PackageManager
 +import androidx.core.content.FileProvider
 +import kotlinx.coroutines.Dispatchers
 +import kotlinx.coroutines.withContext
@@ -77,72 +62,51 @@ index 0000000..06365a2
 +
 +    suspend fun shareApp(context: Context, packageName: String) = withContext(Dispatchers.IO) {
 +        val appInfo = context.packageManager.getApplicationInfo(packageName, 0)
-+        val sourceDir = appInfo.sourceDir
-+        val splitSourceDirs = appInfo.splitSourceDirs
-+
-+        val fileToShare: File = if (splitSourceDirs.isNullOrEmpty()) {
-+            File(sourceDir)
++        val splits  = appInfo.splitSourceDirs
++        val file = if (splits.isNullOrEmpty()) {
++            File(appInfo.sourceDir)
 +        } else {
-+            mergeToApks(context, packageName, sourceDir, splitSourceDirs)
++            mergeToApks(context, packageName, appInfo.sourceDir, splits)
 +        }
-+
-+        val uri = FileProvider.getUriForFile(
-+            context,
-+            "${context.packageName}.mods.fileprovider",
-+            fileToShare
-+        )
-+
-+        val intent = Intent(Intent.ACTION_SEND).apply {
-+            type = if (splitSourceDirs.isNullOrEmpty()) "application/vnd.android.package-archive"
++        val uri  = FileProvider.getUriForFile(context, "${context.packageName}.mods.provider", file)
++        val mime = if (splits.isNullOrEmpty()) "application/vnd.android.package-archive"
 +                   else "application/octet-stream"
++        val intent = Intent(Intent.ACTION_SEND).apply {
++            type = mime
 +            putExtra(Intent.EXTRA_STREAM, uri)
 +            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
 +        }
-+
-+        context.startActivity(Intent.createChooser(intent, "Share ${getAppLabel(context, packageName)}").apply {
-+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-+        })
++        context.startActivity(
++            Intent.createChooser(intent, "Share APK").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        )
 +    }
 +
 +    private suspend fun mergeToApks(
 +        context: Context,
-+        packageName: String,
-+        baseApk: String,
-+        splits: Array<String>
++        pkg: String,
++        base: String,
++        splits: Array<String>,
 +    ): File = withContext(Dispatchers.IO) {
-+        val outputDir = context.cacheDir.resolve("shared_apks").also { it.mkdirs() }
-+        val outFile = outputDir.resolve("$packageName.apks")
-+
-+        ZipOutputStream(FileOutputStream(outFile)).use { zip ->
-+            val allApks = listOf(File(baseApk)) + splits.map { File(it) }
-+            for (apk in allApks) {
++        val dir = File(context.cacheDir, "mods_apks").also { it.mkdirs() }
++        val out = File(dir, "$pkg.apks")
++        ZipOutputStream(FileOutputStream(out)).use { zip ->
++            for (apk in listOf(File(base)) + splits.map { File(it) }) {
 +                zip.putNextEntry(ZipEntry(apk.name))
 +                FileInputStream(apk).copyTo(zip)
 +                zip.closeEntry()
 +            }
 +        }
-+
-+        outFile
-+    }
-+
-+    private fun getAppLabel(context: Context, packageName: String): String {
-+        return try {
-+            val pm = context.packageManager
-+            val appInfo = pm.getApplicationInfo(packageName, 0)
-+            pm.getApplicationLabel(appInfo).toString()
-+        } catch (e: PackageManager.NameNotFoundException) {
-+            packageName
-+        }
++        out
 +    }
 +}
 
-diff --git a/app/src/main/java/app/lawnchair/mods/drawer/AppDrawerFolderSupport.kt b/app/src/main/java/app/lawnchair/mods/drawer/AppDrawerFolderSupport.kt
+diff --git a/lawnchair/src/app/lawnchair/mods/DrawerFolderHelper.kt b/lawnchair/src/app/lawnchair/mods/DrawerFolderHelper.kt
 new file mode 100644
-index 0000000..88ddd5b
+index 0000000..0bad932
 --- /dev/null
-+++ b/app/src/main/java/app/lawnchair/mods/drawer/AppDrawerFolderSupport.kt
-@@ -0,0 +1,88 @@
-+package app.lawnchair.mods.drawer
++++ b/lawnchair/src/app/lawnchair/mods/DrawerFolderHelper.kt
+@@ -0,0 +1,58 @@
++package app.lawnchair.mods
 +
 +import android.content.Context
 +import kotlinx.coroutines.Dispatchers
@@ -151,701 +115,89 @@ index 0000000..88ddd5b
 +import org.json.JSONObject
 +import java.io.File
 +
-+data class DrawerFolder(
-+    val id: String,
-+    val name: String,
-+    val apps: MutableList<String> = mutableListOf()
-+)
++data class DrawerFolder(val id: String, val name: String, val apps: MutableList<String> = mutableListOf())
 +
-+object AppDrawerFolderSupport {
++object DrawerFolderHelper {
 +
-+    private const val FOLDERS_FILE = "drawer_folders.json"
++    private fun file(context: Context) = File(context.filesDir, "mods_drawer_folders.json")
 +
-+    private fun foldersFile(context: Context): File =
-+        File(context.filesDir, FOLDERS_FILE)
-+
-+    suspend fun loadFolders(context: Context): List<DrawerFolder> = withContext(Dispatchers.IO) {
-+        val file = foldersFile(context)
-+        if (!file.exists()) return@withContext emptyList()
-+        val json = JSONArray(file.readText())
-+        (0 until json.length()).map { i ->
-+            val obj = json.getJSONObject(i)
-+            val apps = obj.getJSONArray("apps")
++    suspend fun load(context: Context): List<DrawerFolder> = withContext(Dispatchers.IO) {
++        val f = file(context)
++        if (!f.exists()) return@withContext emptyList()
++        val arr = JSONArray(f.readText())
++        (0 until arr.length()).map { i ->
++            val o = arr.getJSONObject(i)
++            val apps = o.getJSONArray("apps")
 +            DrawerFolder(
-+                id = obj.getString("id"),
-+                name = obj.getString("name"),
-+                apps = (0 until apps.length()).map { apps.getString(it) }.toMutableList()
++                id = o.getString("id"),
++                name = o.getString("name"),
++                apps = (0 until apps.length()).map { apps.getString(it) }.toMutableList(),
 +            )
 +        }
 +    }
 +
-+    suspend fun saveFolders(context: Context, folders: List<DrawerFolder>) = withContext(Dispatchers.IO) {
-+        val json = JSONArray()
-+        for (folder in folders) {
-+            val obj = JSONObject().apply {
++    suspend fun save(context: Context, folders: List<DrawerFolder>) = withContext(Dispatchers.IO) {
++        val arr = JSONArray()
++        folders.forEach { folder ->
++            arr.put(JSONObject().apply {
 +                put("id", folder.id)
 +                put("name", folder.name)
-+                val apps = JSONArray()
-+                folder.apps.forEach { apps.put(it) }
-+                put("apps", apps)
-+            }
-+            json.put(obj)
++                put("apps", JSONArray().also { a -> folder.apps.forEach { a.put(it) } })
++            })
 +        }
-+        foldersFile(context).writeText(json.toString())
++        file(context).writeText(arr.toString())
 +    }
 +
-+    suspend fun createFolder(context: Context, name: String): DrawerFolder {
-+        val folders = loadFolders(context).toMutableList()
-+        val folder = DrawerFolder(
-+            id = "folder_${System.currentTimeMillis()}",
-+            name = name
-+        )
++    suspend fun createFolder(context: Context, name: String, apps: List<String>): DrawerFolder {
++        val folders = load(context).toMutableList()
++        val folder  = DrawerFolder("folder_${System.currentTimeMillis()}", name, apps.toMutableList())
 +        folders.add(folder)
-+        saveFolders(context, folders)
++        save(context, folders)
 +        return folder
 +    }
 +
-+    suspend fun addAppsToFolder(context: Context, folderId: String, packageNames: List<String>) {
-+        val folders = loadFolders(context).toMutableList()
-+        val index = folders.indexOfFirst { it.id == folderId }
-+        if (index == -1) return
-+        val folder = folders[index]
-+        packageNames.forEach { pkg ->
-+            if (pkg !in folder.apps) folder.apps.add(pkg)
-+        }
-+        folders[index] = folder
-+        saveFolders(context, folders)
-+    }
-+
-+    suspend fun removeFolder(context: Context, folderId: String) {
-+        val folders = loadFolders(context).filter { it.id != folderId }
-+        saveFolders(context, folders)
-+    }
-+
-+    suspend fun renameFolder(context: Context, folderId: String, newName: String) {
-+        val folders = loadFolders(context).toMutableList()
-+        val index = folders.indexOfFirst { it.id == folderId }
-+        if (index == -1) return
-+        folders[index] = folders[index].copy(name = newName)
-+        saveFolders(context, folders)
++    suspend fun addToFolder(context: Context, folderId: String, apps: List<String>) {
++        val folders = load(context).toMutableList()
++        val i = folders.indexOfFirst { it.id == folderId }
++        if (i < 0) return
++        apps.forEach { pkg -> if (pkg !in folders[i].apps) folders[i].apps.add(pkg) }
++        save(context, folders)
 +    }
 +}
 
-diff --git a/app/src/main/java/app/lawnchair/mods/drawer/WorkTabUserFolder.kt b/app/src/main/java/app/lawnchair/mods/drawer/WorkTabUserFolder.kt
+diff --git a/lawnchair/src/app/lawnchair/mods/MultiUserHelper.kt b/lawnchair/src/app/lawnchair/mods/MultiUserHelper.kt
 new file mode 100644
-index 0000000..7fbf373
+index 0000000..cfd55b2
 --- /dev/null
-+++ b/app/src/main/java/app/lawnchair/mods/drawer/WorkTabUserFolder.kt
-@@ -0,0 +1,59 @@
-+package app.lawnchair.mods.drawer
++++ b/lawnchair/src/app/lawnchair/mods/MultiUserHelper.kt
+@@ -0,0 +1,19 @@
++package app.lawnchair.mods
 +
 +import android.content.Context
-+import android.content.pm.LauncherApps
-+import android.content.pm.PackageManager
-+import android.os.UserHandle
 +import android.os.UserManager
-+import app.lawnchair.mods.multiuser.UserProfile
 +
-+data class AppEntry(
-+    val packageName: String,
-+    val label: String,
-+    val userHandle: UserHandle
-+)
-+
-+data class UserFolder(
-+    val profile: UserProfile,
-+    val apps: List<AppEntry>
-+)
-+
-+object WorkTabUserFolder {
-+
-+    fun buildWorkFolders(context: Context): List<UserFolder> {
-+        val um = context.getSystemService(Context.USER_SERVICE) as UserManager
-+        val la = context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
-+        val pm = context.packageManager
-+
-+        return um.userProfiles
-+            .filter { it.identifier != 0 }
-+            .map { handle ->
-+                val userId = handle.identifier
-+                val apps = la.getActivityList(null, handle).map { info ->
-+                    AppEntry(
-+                        packageName = info.applicationInfo.packageName,
-+                        label = info.label.toString(),
-+                        userHandle = handle
-+                    )
-+                }
-+                UserFolder(
-+                    profile = UserProfile(id = userId, name = "user $userId"),
-+                    apps = apps
-+                )
-+            }
-+    }
-+
-+    fun getPrimaryUserApps(context: Context): List<AppEntry> {
-+        val la = context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
-+        val um = context.getSystemService(Context.USER_SERVICE) as UserManager
-+        val primaryHandle = um.userProfiles.first { it.identifier == 0 }
-+
-+        return la.getActivityList(null, primaryHandle).map { info ->
-+            AppEntry(
-+                packageName = info.applicationInfo.packageName,
-+                label = info.label.toString(),
-+                userHandle = primaryHandle
-+            )
-+        }
-+    }
-+}
-
-diff --git a/app/src/main/java/app/lawnchair/mods/menu/AppLongPressMenuExtension.kt b/app/src/main/java/app/lawnchair/mods/menu/AppLongPressMenuExtension.kt
-new file mode 100644
-index 0000000..d302910
---- /dev/null
-+++ b/app/src/main/java/app/lawnchair/mods/menu/AppLongPressMenuExtension.kt
-@@ -0,0 +1,108 @@
-+package app.lawnchair.mods.menu
-+
-+import android.content.Context
-+import android.view.LayoutInflater
-+import android.widget.Toast
-+import androidx.appcompat.app.AlertDialog
-+import app.lawnchair.mods.apk.ApkShareHelper
-+import app.lawnchair.mods.multiuser.MultiUserHelper
-+import app.lawnchair.mods.permissions.AdvancedPermissionsHelper
-+import app.lawnchair.mods.root.RootCommandHelper
-+import app.lawnchair.mods.root.RootExplorerHelper
-+import kotlinx.coroutines.CoroutineScope
-+import kotlinx.coroutines.Dispatchers
-+import kotlinx.coroutines.launch
-+import kotlinx.coroutines.withContext
-+
-+data class AppMenuItem(val label: String, val action: suspend () -> Unit)
-+
-+class AppLongPressMenuExtension(
-+    private val context: Context,
-+    private val packageName: String,
-+    private val scope: CoroutineScope
-+) {
-+
-+    fun buildMenuItems(): List<AppMenuItem> = listOf(
-+        AppMenuItem("Advanced Permissions") { showAdvancedPermissionsDialog() },
-+        AppMenuItem("Share App") { shareApp() },
-+        AppMenuItem("Install to Another User") { showInstallToUserDialog() },
-+        AppMenuItem("Show Data Dir") { showDataDir() },
-+        AppMenuItem("Show App Dir") { showAppDir() },
-+        AppMenuItem("Select") { onSelectRequested() }
-+    )
-+
-+    private suspend fun showAdvancedPermissionsDialog() = withContext(Dispatchers.Main) {
-+        val options = arrayOf(
-+            "Grant Usage Stats",
-+            "Grant Access All Files",
-+            "Grant Install Unknown Sources",
-+            "Grant All"
-+        )
-+        AlertDialog.Builder(context)
-+            .setTitle("Advanced Permissions")
-+            .setItems(options) { _, which ->
-+                scope.launch {
-+                    val results = when (which) {
-+                        0 -> listOf(AdvancedPermissionsHelper.grantUsageStats(packageName))
-+                        1 -> listOf(AdvancedPermissionsHelper.grantAllFiles(packageName))
-+                        2 -> listOf(AdvancedPermissionsHelper.grantInstallUnknownSources(packageName))
-+                        else -> AdvancedPermissionsHelper.grantAll(packageName)
-+                    }
-+                    val allOk = results.all { it.success }
-+                    toast(if (allOk) "Permissions granted" else "Failed: ${results.firstOrNull { !it.success }?.error}")
-+                }
-+            }
-+            .show()
-+    }
-+
-+    private suspend fun shareApp() {
-+        try {
-+            ApkShareHelper.shareApp(context, packageName)
-+        } catch (e: Exception) {
-+            withContext(Dispatchers.Main) { toast("Share failed: ${e.message}") }
-+        }
-+    }
-+
-+    private suspend fun showInstallToUserDialog() = withContext(Dispatchers.Main) {
-+        val users = MultiUserHelper.getSecondaryUsers(context)
-+        if (users.isEmpty()) {
-+            toast("No secondary users found")
-+            return@withContext
-+        }
-+        val labels = users.map { it.name }.toTypedArray()
-+        AlertDialog.Builder(context)
-+            .setTitle("Install to User")
-+            .setItems(labels) { _, which ->
-+                val user = users[which]
-+                scope.launch {
-+                    val result = MultiUserHelper.installToUser(packageName, user.id)
-+                    withContext(Dispatchers.Main) {
-+                        toast(if (result.success) "Installed to ${user.name}" else "Failed: ${result.error}")
-+                    }
-+                }
-+            }
-+            .show()
-+    }
-+
-+    private fun showDataDir() {
-+        try {
-+            RootExplorerHelper.openDataDir(context, packageName)
-+        } catch (e: Exception) {
-+            toast("Error: ${e.message}")
-+        }
-+    }
-+
-+    private fun showAppDir() {
-+        try {
-+            RootExplorerHelper.openAppDir(context, packageName)
-+        } catch (e: Exception) {
-+            toast("Error: ${e.message}")
-+        }
-+    }
-+
-+    var onSelectRequested: suspend () -> Unit = {}
-+
-+    private fun toast(msg: String) {
-+        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-+    }
-+}
-
-diff --git a/app/src/main/java/app/lawnchair/mods/menu/AppSelectionBottomSheet.kt b/app/src/main/java/app/lawnchair/mods/menu/AppSelectionBottomSheet.kt
-new file mode 100644
-index 0000000..599f973
---- /dev/null
-+++ b/app/src/main/java/app/lawnchair/mods/menu/AppSelectionBottomSheet.kt
-@@ -0,0 +1,237 @@
-+package app.lawnchair.mods.menu
-+
-+import android.app.Dialog
-+import android.content.Intent
-+import android.content.pm.PackageManager
-+import android.net.Uri
-+import android.os.Bundle
-+import android.view.LayoutInflater
-+import android.view.View
-+import android.view.ViewGroup
-+import android.widget.CheckBox
-+import android.widget.TextView
-+import android.widget.Toast
-+import androidx.appcompat.app.AlertDialog
-+import androidx.fragment.app.FragmentManager
-+import androidx.lifecycle.lifecycleScope
-+import app.lawnchair.mods.R
-+import app.lawnchair.mods.drawer.AppDrawerFolderSupport
-+import com.google.android.material.bottomsheet.BottomSheetBehavior
-+import com.google.android.material.bottomsheet.BottomSheetDialog
-+import com.google.android.material.bottomsheet.BottomSheetDialogFragment
-+import com.google.android.material.chip.Chip
-+import com.google.android.material.chip.ChipGroup
-+import com.google.android.material.textfield.TextInputEditText
-+import kotlinx.coroutines.launch
-+
-+class AppSelectionBottomSheet : BottomSheetDialogFragment() {
-+
-+    private lateinit var selectionManager: AppSelectionManager
-+
-+    /** Full list of packages visible in the current drawer view — used for Select All. */
-+    private var allVisiblePackages: List<String> = emptyList()
-+
-+    companion object {
-+        private const val TAG = "AppSelectionBottomSheet"
-+
-+        fun show(
-+            fragmentManager: FragmentManager,
-+            selectionManager: AppSelectionManager,
-+            allVisiblePackages: List<String> = emptyList()
-+        ): AppSelectionBottomSheet {
-+            val sheet = AppSelectionBottomSheet()
-+            sheet.selectionManager = selectionManager
-+            sheet.allVisiblePackages = allVisiblePackages
-+            sheet.show(fragmentManager, TAG)
-+            return sheet
-+        }
-+    }
-+
-+    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
-+        return BottomSheetDialog(requireContext(), theme).apply {
-+            behavior.state = BottomSheetBehavior.STATE_EXPANDED
-+            behavior.skipCollapsed = false
-+        }
-+    }
-+
-+    override fun onCreateView(
-+        inflater: LayoutInflater,
-+        container: ViewGroup?,
-+        savedInstanceState: Bundle?
-+    ): View = inflater.inflate(R.layout.bottom_sheet_app_selection, container, false)
-+
-+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-+        super.onViewCreated(view, savedInstanceState)
-+
-+        val tvCount = view.findViewById<TextView>(R.id.tvSelectionCount)
-+        val chipGroup = view.findViewById<ChipGroup>(R.id.chipGroupSelectedApps)
-+        val checkSelectAll = view.findViewById<CheckBox>(R.id.checkSelectAll)
-+        val btnClear = view.findViewById<View>(R.id.btnClearSelection)
-+        val actionMerge = view.findViewById<View>(R.id.actionMergeToFolder)
-+        val actionShare = view.findViewById<View>(R.id.actionShare)
-+        val actionUninstall = view.findViewById<View>(R.id.actionUninstall)
-+
-+        renderChips(chipGroup, tvCount, checkSelectAll)
-+
-+        checkSelectAll.setOnCheckedChangeListener { _, isChecked ->
-+            if (isChecked) {
-+                selectionManager.selectAll(allVisiblePackages)
-+            } else {
-+                selectionManager.clear()
-+                if (selectionManager.selectedPackages.isEmpty()) {
-+                    dismiss()
-+                    return@setOnCheckedChangeListener
-+                }
-+            }
-+            renderChips(chipGroup, tvCount, checkSelectAll)
-+        }
-+
-+        btnClear.setOnClickListener {
-+            selectionManager.clear()
-+            dismiss()
-+        }
-+
-+        actionMerge.setOnClickListener { showMergeToFolderDialog() }
-+
-+        actionShare.setOnClickListener {
-+            selectionManager.shareSelected()
-+            dismiss()
-+        }
-+
-+        actionUninstall.setOnClickListener { confirmUninstall() }
-+    }
-+
-+    private fun renderChips(chipGroup: ChipGroup, tvCount: TextView, checkSelectAll: CheckBox) {
-+        chipGroup.removeAllViews()
-+        val selected = selectionManager.selectedPackages
-+
-+        tvCount.text = "${selected.size} selected"
-+
-+        val allSelected = allVisiblePackages.isNotEmpty() &&
-+                allVisiblePackages.all { it in selected }
-+        val someSelected = !allSelected && selected.isNotEmpty()
-+
-+        // Update checkbox without re-triggering the listener
-+        checkSelectAll.setOnCheckedChangeListener(null)
-+        checkSelectAll.isChecked = allSelected
-+        checkSelectAll.alpha = if (someSelected) 0.5f else 1f   // dim when partial
-+        checkSelectAll.setOnCheckedChangeListener { _, isChecked ->
-+            if (isChecked) {
-+                selectionManager.selectAll(allVisiblePackages)
-+            } else {
-+                selectionManager.clear()
-+                if (selectionManager.selectedPackages.isEmpty()) {
-+                    dismiss()
-+                    return@setOnCheckedChangeListener
-+                }
-+            }
-+            renderChips(chipGroup, tvCount, checkSelectAll)
-+        }
-+
-+        val pm = requireContext().packageManager
-+        for (pkg in selected) {
-+            val label = try {
-+                pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
-+            } catch (e: PackageManager.NameNotFoundException) {
-+                pkg
-+            }
-+
-+            val chip = Chip(requireContext()).apply {
-+                text = label
-+                isCloseIconVisible = true
-+                setOnCloseIconClickListener {
-+                    selectionManager.toggle(pkg)
-+                    if (selectionManager.selectedPackages.isEmpty()) {
-+                        dismiss()
-+                    } else {
-+                        renderChips(chipGroup, tvCount, checkSelectAll)
-+                    }
-+                }
-+            }
-+            chipGroup.addView(chip)
-+        }
-+    }
-+
-+    private fun showMergeToFolderDialog() {
-+        val ctx = requireContext()
-+        lifecycleScope.launch {
-+            val existing = AppDrawerFolderSupport.loadFolders(ctx)
-+            val options = mutableListOf("+ Create new folder") + existing.map { it.name }
-+
-+            AlertDialog.Builder(ctx)
-+                .setTitle("Merge to Folder")
-+                .setItems(options.toTypedArray()) { _, which ->
-+                    if (which == 0) {
-+                        showCreateFolderDialog()
-+                    } else {
-+                        val folder = existing[which - 1]
-+                        lifecycleScope.launch {
-+                            AppDrawerFolderSupport.addAppsToFolder(
-+                                ctx,
-+                                folder.id,
-+                                selectionManager.selectedPackages.toList()
-+                            )
-+                            selectionManager.clear()
-+                            toast("Added to \"${folder.name}\"")
-+                            dismiss()
-+                        }
-+                    }
-+                }
-+                .show()
-+        }
-+    }
-+
-+    private fun showCreateFolderDialog() {
-+        val ctx = requireContext()
-+        val dialogView = layoutInflater.inflate(R.layout.dialog_create_folder, null)
-+        val input = dialogView.findViewById<TextInputEditText>(R.id.folderNameInput)
-+
-+        AlertDialog.Builder(ctx)
-+            .setTitle("New Folder")
-+            .setView(dialogView)
-+            .setPositiveButton("Create") { _, _ ->
-+                val name = input.text?.toString()?.trim()
-+                if (name.isNullOrEmpty()) {
-+                    toast("Folder name cannot be empty")
-+                    return@setPositiveButton
-+                }
-+                lifecycleScope.launch {
-+                    val folder = AppDrawerFolderSupport.createFolder(ctx, name)
-+                    AppDrawerFolderSupport.addAppsToFolder(
-+                        ctx,
-+                        folder.id,
-+                        selectionManager.selectedPackages.toList()
-+                    )
-+                    selectionManager.clear()
-+                    toast("Folder \"$name\" created")
-+                    dismiss()
-+                }
-+            }
-+            .setNegativeButton("Cancel", null)
-+            .show()
-+    }
-+
-+    private fun confirmUninstall() {
-+        val ctx = requireContext()
-+        val count = selectionManager.selectedPackages.size
-+        AlertDialog.Builder(ctx)
-+            .setTitle("Uninstall $count app${if (count == 1) "" else "s"}?")
-+            .setMessage("This will remove the selected apps from the device.")
-+            .setPositiveButton("Uninstall") { _, _ ->
-+                selectionManager.uninstallSelected { pkg ->
-+                    val intent = Intent(Intent.ACTION_UNINSTALL_PACKAGE).apply {
-+                        data = Uri.parse("package:$pkg")
-+                        putExtra(Intent.EXTRA_RETURN_RESULT, true)
-+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-+                    }
-+                    ctx.startActivity(intent)
-+                }
-+                dismiss()
-+            }
-+            .setNegativeButton("Cancel", null)
-+            .show()
-+    }
-+
-+    private fun toast(msg: String) =
-+        Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show()
-+}
-
-diff --git a/app/src/main/java/app/lawnchair/mods/menu/AppSelectionManager.kt b/app/src/main/java/app/lawnchair/mods/menu/AppSelectionManager.kt
-new file mode 100644
-index 0000000..009d2fb
---- /dev/null
-+++ b/app/src/main/java/app/lawnchair/mods/menu/AppSelectionManager.kt
-@@ -0,0 +1,68 @@
-+package app.lawnchair.mods.menu
-+
-+import android.content.Context
-+import android.widget.Toast
-+import app.lawnchair.mods.apk.ApkShareHelper
-+import kotlinx.coroutines.CoroutineScope
-+import kotlinx.coroutines.Dispatchers
-+import kotlinx.coroutines.launch
-+import kotlinx.coroutines.withContext
-+
-+class AppSelectionManager(
-+    private val context: Context,
-+    private val scope: CoroutineScope
-+) {
-+
-+    private val _selectedPackages = mutableSetOf<String>()
-+    val selectedPackages: Set<String> get() = _selectedPackages
-+
-+    val isActive get() = _selectedPackages.isNotEmpty()
-+
-+    fun toggle(packageName: String): Boolean {
-+        return if (packageName in _selectedPackages) {
-+            _selectedPackages.remove(packageName)
-+            false
-+        } else {
-+            _selectedPackages.add(packageName)
-+            true
-+        }
-+    }
-+
-+    fun isSelected(packageName: String) = packageName in _selectedPackages
-+
-+    fun clear() = _selectedPackages.clear()
-+
-+    fun selectAll(packages: List<String>) {
-+        _selectedPackages.addAll(packages)
-+    }
-+
-+    fun shareSelected() {
-+        val packages = _selectedPackages.toList()
-+        scope.launch {
-+            for (pkg in packages) {
-+                try {
-+                    ApkShareHelper.shareApp(context, pkg)
-+                } catch (e: Exception) {
-+                    withContext(Dispatchers.Main) {
-+                        Toast.makeText(context, "Failed to share $pkg: ${e.message}", Toast.LENGTH_SHORT).show()
-+                    }
-+                }
-+            }
-+        }
-+    }
-+
-+    fun uninstallSelected(onUninstall: (String) -> Unit) {
-+        val packages = _selectedPackages.toList()
-+        for (pkg in packages) {
-+            onUninstall(pkg)
-+        }
-+        clear()
-+    }
-+
-+    var onMergeToFolder: ((Set<String>) -> Unit)? = null
-+
-+    fun mergeSelectedToFolder() {
-+        onMergeToFolder?.invoke(_selectedPackages.toSet())
-+        clear()
-+    }
-+}
-
-diff --git a/app/src/main/java/app/lawnchair/mods/multiuser/MultiUserHelper.kt b/app/src/main/java/app/lawnchair/mods/multiuser/MultiUserHelper.kt
-new file mode 100644
-index 0000000..f020944
---- /dev/null
-+++ b/app/src/main/java/app/lawnchair/mods/multiuser/MultiUserHelper.kt
-@@ -0,0 +1,44 @@
-+package app.lawnchair.mods.multiuser
-+
-+import android.content.Context
-+import android.os.UserHandle
-+import android.os.UserManager
-+import app.lawnchair.mods.root.RootCommandHelper
-+import kotlinx.coroutines.Dispatchers
-+import kotlinx.coroutines.withContext
-+
-+data class UserProfile(val id: Int, val name: String)
++data class UserInfo(val id: Int, val name: String)
 +
 +object MultiUserHelper {
 +
-+    fun getSecondaryUsers(context: Context): List<UserProfile> {
++    fun getSecondaryUsers(context: Context): List<UserInfo> {
 +        val um = context.getSystemService(Context.USER_SERVICE) as UserManager
 +        return um.userProfiles
-+            .mapNotNull { handle ->
-+                val userId = handle.identifier
-+                if (userId == 0) null
-+                else UserProfile(
-+                    id = userId,
-+                    name = "user $userId"
-+                )
-+            }
++            .filter { it.identifier != 0 }
++            .map { UserInfo(it.identifier, "user ${it.identifier}") }
 +    }
 +
-+    suspend fun installToUser(packageName: String, userId: Int): RootCommandHelper.RootResult {
-+        return RootCommandHelper.exec("pm install-existing --user $userId $packageName")
-+    }
-+
-+    suspend fun getInstalledPackagesForUser(userId: Int): List<String> =
-+        withContext(Dispatchers.IO) {
-+            val result = RootCommandHelper.exec("pm list packages --user $userId")
-+            if (!result.success) return@withContext emptyList()
-+            result.output.lines()
-+                .filter { it.startsWith("package:") }
-+                .map { it.removePrefix("package:").trim() }
-+        }
-+
-+    suspend fun isPackageInstalledForUser(packageName: String, userId: Int): Boolean {
-+        val packages = getInstalledPackagesForUser(userId)
-+        return packageName in packages
-+    }
++    suspend fun installToUser(packageName: String, userId: Int): RootCommandHelper.RootResult =
++        RootCommandHelper.exec("pm install-existing --user $userId $packageName")
 +}
 
-diff --git a/app/src/main/java/app/lawnchair/mods/permissions/AdvancedPermissionsHelper.kt b/app/src/main/java/app/lawnchair/mods/permissions/AdvancedPermissionsHelper.kt
+diff --git a/lawnchair/src/app/lawnchair/mods/RootCommandHelper.kt b/lawnchair/src/app/lawnchair/mods/RootCommandHelper.kt
 new file mode 100644
-index 0000000..52c24ce
+index 0000000..c2d142c
 --- /dev/null
-+++ b/app/src/main/java/app/lawnchair/mods/permissions/AdvancedPermissionsHelper.kt
-@@ -0,0 +1,50 @@
-+package app.lawnchair.mods.permissions
-+
-+import app.lawnchair.mods.root.RootCommandHelper
-+
-+object AdvancedPermissionsHelper {
-+
-+    suspend fun grantUsageStats(packageName: String): RootCommandHelper.RootResult {
-+        return RootCommandHelper.exec(
-+            "appops set $packageName PACKAGE_USAGE_STATS allow"
-+        )
-+    }
-+
-+    suspend fun grantAllFiles(packageName: String): RootCommandHelper.RootResult {
-+        return RootCommandHelper.exec(
-+            "appops set $packageName MANAGE_EXTERNAL_STORAGE allow"
-+        )
-+    }
-+
-+    suspend fun grantInstallUnknownSources(packageName: String): RootCommandHelper.RootResult {
-+        return RootCommandHelper.exec(
-+            "appops set $packageName REQUEST_INSTALL_PACKAGES allow"
-+        )
-+    }
-+
-+    suspend fun grantAll(packageName: String): List<RootCommandHelper.RootResult> {
-+        return listOf(
-+            grantUsageStats(packageName),
-+            grantAllFiles(packageName),
-+            grantInstallUnknownSources(packageName)
-+        )
-+    }
-+
-+    suspend fun revokeUsageStats(packageName: String): RootCommandHelper.RootResult {
-+        return RootCommandHelper.exec(
-+            "appops set $packageName PACKAGE_USAGE_STATS deny"
-+        )
-+    }
-+
-+    suspend fun revokeAllFiles(packageName: String): RootCommandHelper.RootResult {
-+        return RootCommandHelper.exec(
-+            "appops set $packageName MANAGE_EXTERNAL_STORAGE deny"
-+        )
-+    }
-+
-+    suspend fun revokeInstallUnknownSources(packageName: String): RootCommandHelper.RootResult {
-+        return RootCommandHelper.exec(
-+            "appops set $packageName REQUEST_INSTALL_PACKAGES deny"
-+        )
-+    }
-+}
-
-diff --git a/app/src/main/java/app/lawnchair/mods/root/RootCommandHelper.kt b/app/src/main/java/app/lawnchair/mods/root/RootCommandHelper.kt
-new file mode 100644
-index 0000000..6efcb79
---- /dev/null
-+++ b/app/src/main/java/app/lawnchair/mods/root/RootCommandHelper.kt
-@@ -0,0 +1,39 @@
-+package app.lawnchair.mods.root
++++ b/lawnchair/src/app/lawnchair/mods/RootCommandHelper.kt
+@@ -0,0 +1,30 @@
++package app.lawnchair.mods
 +
 +import kotlinx.coroutines.Dispatchers
 +import kotlinx.coroutines.withContext
@@ -863,54 +215,43 @@ index 0000000..6efcb79
 +        try {
 +            val process = Runtime.getRuntime().exec("su")
 +            val writer = OutputStreamWriter(process.outputStream)
-+            for (cmd in commands) {
-+                writer.write("$cmd\n")
-+            }
++            for (cmd in commands) writer.write("$cmd\n")
 +            writer.write("exit\n")
 +            writer.flush()
 +            writer.close()
-+
 +            val output = BufferedReader(InputStreamReader(process.inputStream)).readText().trim()
-+            val error = BufferedReader(InputStreamReader(process.errorStream)).readText().trim()
-+            val exitCode = process.waitFor()
-+            RootResult(output, error, exitCode)
++            val error  = BufferedReader(InputStreamReader(process.errorStream)).readText().trim()
++            RootResult(output, error, process.waitFor())
 +        } catch (e: Exception) {
 +            RootResult("", e.message ?: "Unknown error", -1)
 +        }
 +    }
-+
-+    suspend fun isRootAvailable(): Boolean {
-+        val result = exec("id")
-+        return result.success && result.output.contains("uid=0")
-+    }
 +}
 
-diff --git a/app/src/main/java/app/lawnchair/mods/root/RootExplorerHelper.kt b/app/src/main/java/app/lawnchair/mods/root/RootExplorerHelper.kt
+diff --git a/lawnchair/src/app/lawnchair/mods/RootExplorerHelper.kt b/lawnchair/src/app/lawnchair/mods/RootExplorerHelper.kt
 new file mode 100644
-index 0000000..30e8a52
+index 0000000..9c0788b
 --- /dev/null
-+++ b/app/src/main/java/app/lawnchair/mods/root/RootExplorerHelper.kt
-@@ -0,0 +1,54 @@
-+package app.lawnchair.mods.root
++++ b/lawnchair/src/app/lawnchair/mods/RootExplorerHelper.kt
+@@ -0,0 +1,41 @@
++package app.lawnchair.mods
 +
 +import android.content.Context
 +import android.content.Intent
-+import android.content.pm.PackageManager
 +import android.net.Uri
 +
 +object RootExplorerHelper {
 +
-+    private val SUPPORTED_EXPLORERS = listOf(
++    private val EXPLORERS = listOf(
 +        "com.mixplorer",
 +        "com.mixplorer.silver",
 +        "bin.mt.plus.canary",
-+        "bin.mt.plus"
++        "bin.mt.plus",
 +    )
 +
 +    fun openPath(context: Context, path: String) {
-+        val explorer = findInstalledExplorer(context)
-+            ?: throw IllegalStateException("No supported root explorer installed")
-+
++        val explorer = findExplorer(context)
++            ?: throw IllegalStateException("No supported root explorer installed (MiXplorer / MT Manager)")
 +        val intent = Intent(Intent.ACTION_VIEW).apply {
 +            setPackage(explorer)
 +            data = Uri.parse("file://$path")
@@ -919,285 +260,1048 @@ index 0000000..30e8a52
 +        context.startActivity(intent)
 +    }
 +
-+    fun openDataDir(context: Context, packageName: String) {
++    fun openDataDir(context: Context, packageName: String) =
 +        openPath(context, "/data/data/$packageName")
-+    }
 +
 +    fun openAppDir(context: Context, packageName: String) {
-+        val apkPath = context.packageManager
-+            .getApplicationInfo(packageName, 0)
-+            .publicSourceDir
-+        openPath(context, apkPath)
++        val apk = context.packageManager.getApplicationInfo(packageName, 0).publicSourceDir
++        openPath(context, apk)
 +    }
 +
-+    fun findInstalledExplorer(context: Context): String? {
-+        val pm = context.packageManager
-+        return SUPPORTED_EXPLORERS.firstOrNull { pkg ->
-+            try {
-+                pm.getPackageInfo(pkg, 0)
-+                true
-+            } catch (e: PackageManager.NameNotFoundException) {
-+                false
++    fun findExplorer(context: Context): String? =
++        EXPLORERS.firstOrNull {
++            runCatching { context.packageManager.getPackageInfo(it, 0) }.isSuccess
++        }
++
++    fun hasExplorer(context: Context) = findExplorer(context) != null
++}
+
+diff --git a/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt b/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt
+new file mode 100644
+index 0000000..7cfd209
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt
+@@ -0,0 +1,245 @@
++package app.lawnchair.ui.popup
++
++import android.content.Context
++import android.content.Intent
++import android.content.pm.ApplicationInfo
++import android.content.pm.PackageManager
++import android.net.Uri
++import android.view.View
++import android.widget.EditText
++import android.widget.Toast
++import androidx.appcompat.app.AlertDialog
++import app.lawnchair.mods.AdvancedPermissionsHelper
++import app.lawnchair.mods.ApkShareHelper
++import app.lawnchair.mods.DrawerFolderHelper
++import app.lawnchair.mods.MultiUserHelper
++import app.lawnchair.mods.RootExplorerHelper
++import app.lawnchair.mods.UserInfo
++import com.android.launcher3.Launcher
++import com.android.launcher3.R
++import com.android.launcher3.model.data.ItemInfo
++import com.android.launcher3.popup.SystemShortcut
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++
++object ModsShortcuts {
++
++    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
++
++    // ─── Advanced Permissions ────────────────────────────────────────────────
++
++    val ADVANCED_PERMISSIONS = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
++        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
++        AdvancedPermissionsShortcut(launcher, itemInfo, view, pkg)
++    }
++
++    private class AdvancedPermissionsShortcut(
++        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
++    ) : SystemShortcut<Launcher>(R.drawable.ic_info_no_shadow, R.string.mods_advanced_permissions, launcher, itemInfo, view) {
++
++        override fun onClick(v: View) {
++            AlertDialog.Builder(mTarget)
++                .setTitle("Advanced Permissions")
++                .setItems(arrayOf("Grant Usage Stats", "Grant Access All Files", "Grant Unknown Sources", "Grant All")) { _, which ->
++                    scope.launch {
++                        val results = when (which) {
++                            0 -> listOf(AdvancedPermissionsHelper.grantUsageStats(pkg))
++                            1 -> listOf(AdvancedPermissionsHelper.grantAllFiles(pkg))
++                            2 -> listOf(AdvancedPermissionsHelper.grantUnknownSources(pkg))
++                            else -> AdvancedPermissionsHelper.grantAll(pkg)
++                        }
++                        val ok = results.all { it.success }
++                        toast(mTarget, if (ok) "Permissions granted" else "Failed: ${results.firstOrNull { !it.success }?.error}")
++                    }
++                }
++                .show()
++        }
++    }
++
++    // ─── Share App ───────────────────────────────────────────────────────────
++
++    val SHARE_APP = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
++        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
++        ShareAppShortcut(launcher, itemInfo, view, pkg)
++    }
++
++    private class ShareAppShortcut(
++        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
++    ) : SystemShortcut<Launcher>(R.drawable.ic_install_no_shadow, R.string.mods_share_app, launcher, itemInfo, view) {
++
++        override fun onClick(v: View) {
++            scope.launch {
++                runCatching { ApkShareHelper.shareApp(mTarget, pkg) }
++                    .onFailure { toast(mTarget, "Share failed: ${it.message}") }
 +            }
 +        }
 +    }
 +
-+    fun hasInstalledExplorer(context: Context): Boolean =
-+        findInstalledExplorer(context) != null
++    // ─── Install to Another User ─────────────────────────────────────────────
++
++    val INSTALL_TO_USER = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
++        val pkg   = itemInfo.targetComponent?.packageName ?: return@Factory null
++        val users = MultiUserHelper.getSecondaryUsers(launcher)
++        if (users.isEmpty()) return@Factory null
++        InstallToUserShortcut(launcher, itemInfo, view, pkg, users)
++    }
++
++    private class InstallToUserShortcut(
++        launcher: Launcher, itemInfo: ItemInfo, view: View,
++        private val pkg: String, private val users: List<UserInfo>,
++    ) : SystemShortcut<Launcher>(R.drawable.ic_install_no_shadow, R.string.mods_install_to_user, launcher, itemInfo, view) {
++
++        override fun onClick(v: View) {
++            AlertDialog.Builder(mTarget)
++                .setTitle("Install to User")
++                .setItems(users.map { it.name }.toTypedArray()) { _, which ->
++                    val user = users[which]
++                    scope.launch {
++                        val result = MultiUserHelper.installToUser(pkg, user.id)
++                        toast(mTarget, if (result.success) "Installed to ${user.name}" else "Failed: ${result.error}")
++                    }
++                }
++                .show()
++        }
++    }
++
++    // ─── Show Data Dir ───────────────────────────────────────────────────────
++
++    val SHOW_DATA_DIR = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
++        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
++        if (!RootExplorerHelper.hasExplorer(launcher)) return@Factory null
++        ShowDataDirShortcut(launcher, itemInfo, view, pkg)
++    }
++
++    private class ShowDataDirShortcut(
++        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
++    ) : SystemShortcut<Launcher>(R.drawable.ic_info_no_shadow, R.string.mods_show_data_dir, launcher, itemInfo, view) {
++
++        override fun onClick(v: View) {
++            runCatching { RootExplorerHelper.openDataDir(mTarget, pkg) }
++                .onFailure { toast(mTarget, "Error: ${it.message}") }
++        }
++    }
++
++    // ─── Show App Dir ────────────────────────────────────────────────────────
++
++    val SHOW_APP_DIR = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
++        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
++        if (!RootExplorerHelper.hasExplorer(launcher)) return@Factory null
++        ShowAppDirShortcut(launcher, itemInfo, view, pkg)
++    }
++
++    private class ShowAppDirShortcut(
++        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
++    ) : SystemShortcut<Launcher>(R.drawable.ic_install_no_shadow, R.string.mods_show_app_dir, launcher, itemInfo, view) {
++
++        override fun onClick(v: View) {
++            runCatching { RootExplorerHelper.openAppDir(mTarget, pkg) }
++                .onFailure { toast(mTarget, "Error: ${it.message}") }
++        }
++    }
++
++    // ─── Select ──────────────────────────────────────────────────────────────
++
++    val SELECT = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
++        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
++        SelectShortcut(launcher, itemInfo, view, pkg)
++    }
++
++    private class SelectShortcut(
++        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
++    ) : SystemShortcut<Launcher>(R.drawable.ic_uninstall_no_shadow, R.string.mods_select, launcher, itemInfo, view) {
++
++        override fun onClick(v: View) {
++            val ctx = mTarget
++            val pm  = ctx.packageManager
++            val allApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
++                .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 }
++                .sortedBy { pm.getApplicationLabel(it).toString() }
++            val labels  = allApps.map { pm.getApplicationLabel(it).toString() }.toTypedArray()
++            val pkgList = allApps.map { it.packageName }
++            val checked = BooleanArray(allApps.size) { allApps[it].packageName == pkg }
++
++            AlertDialog.Builder(ctx)
++                .setTitle("Select Apps")
++                .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
++                .setPositiveButton("Next") { _, _ ->
++                    val selected = pkgList.filterIndexed { i, _ -> checked[i] }
++                    if (selected.isNotEmpty()) showActionDialog(ctx, selected)
++                }
++                .setNegativeButton("Cancel", null)
++                .show()
++        }
++
++        private fun showActionDialog(ctx: Context, selected: List<String>) {
++            val count = selected.size
++            AlertDialog.Builder(ctx)
++                .setTitle("$count app${if (count == 1) "" else "s"} selected")
++                .setItems(arrayOf("Merge to Folder", "Share", "Uninstall")) { _, which ->
++                    when (which) {
++                        0 -> showMergeDialog(ctx, selected)
++                        1 -> scope.launch {
++                            selected.forEach { pkg ->
++                                runCatching { ApkShareHelper.shareApp(ctx, pkg) }
++                                    .onFailure { toast(ctx, "Share failed for $pkg") }
++                            }
++                        }
++                        2 -> selected.forEach { pkg ->
++                            ctx.startActivity(Intent(Intent.ACTION_UNINSTALL_PACKAGE).apply {
++                                data = Uri.parse("package:$pkg")
++                                putExtra(Intent.EXTRA_RETURN_RESULT, true)
++                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++                            })
++                        }
++                    }
++                }
++                .show()
++        }
++
++        private fun showMergeDialog(ctx: Context, selected: List<String>) {
++            scope.launch {
++                val existing = DrawerFolderHelper.load(ctx)
++                val options  = (listOf("+ New folder") + existing.map { it.name }).toTypedArray()
++                withContext(Dispatchers.Main) {
++                    AlertDialog.Builder(ctx)
++                        .setTitle("Merge to Folder")
++                        .setItems(options) { _, which ->
++                            if (which == 0) {
++                                showCreateFolderDialog(ctx, selected)
++                            } else {
++                                val folder = existing[which - 1]
++                                scope.launch {
++                                    DrawerFolderHelper.addToFolder(ctx, folder.id, selected)
++                                    toast(ctx, "Added to \"${folder.name}\"")
++                                }
++                            }
++                        }
++                        .show()
++                }
++            }
++        }
++
++        private fun showCreateFolderDialog(ctx: Context, selected: List<String>) {
++            val input = EditText(ctx).apply { hint = "Folder name" }
++            AlertDialog.Builder(ctx)
++                .setTitle("New Folder")
++                .setView(input)
++                .setPositiveButton("Create") { _, _ ->
++                    val name = input.text.toString().trim()
++                    if (name.isEmpty()) { toast(ctx, "Name cannot be empty"); return@setPositiveButton }
++                    scope.launch {
++                        DrawerFolderHelper.createFolder(ctx, name, selected)
++                        toast(ctx, "Folder \"$name\" created")
++                    }
++                }
++                .setNegativeButton("Cancel", null)
++                .show()
++        }
++    }
++
++    private fun toast(ctx: Context, msg: String) =
++        Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
 +}
 
-diff --git a/app/src/main/res/drawable/drag_handle_background.xml b/app/src/main/res/drawable/drag_handle_background.xml
+diff --git a/res/values/mods_strings.xml b/res/values/mods_strings.xml
 new file mode 100644
-index 0000000..cddd9fe
+index 0000000..2f4e2b6
 --- /dev/null
-+++ b/app/src/main/res/drawable/drag_handle_background.xml
-@@ -0,0 +1,6 @@
++++ b/res/values/mods_strings.xml
+@@ -0,0 +1,9 @@
 +<?xml version="1.0" encoding="utf-8"?>
-+<shape xmlns:android="http://schemas.android.com/apk/res/android"
-+    android:shape="rectangle">
-+    <solid android:color="?attr/colorOutlineVariant" />
-+    <corners android:radius="4dp" />
-+</shape>
++<resources>
++    <string name="mods_advanced_permissions">Advanced Permissions</string>
++    <string name="mods_share_app">Share App</string>
++    <string name="mods_install_to_user">Install to User</string>
++    <string name="mods_show_data_dir">Show Data Dir</string>
++    <string name="mods_show_app_dir">Show App Dir</string>
++    <string name="mods_select">Select</string>
++</resources>
 
-diff --git a/app/src/main/res/layout/bottom_sheet_app_selection.xml b/app/src/main/res/layout/bottom_sheet_app_selection.xml
+diff --git a/res/xml/mods_provider_paths.xml b/res/xml/mods_provider_paths.xml
 new file mode 100644
-index 0000000..3ac73a5
+index 0000000..493bf9a
 --- /dev/null
-+++ b/app/src/main/res/layout/bottom_sheet_app_selection.xml
-@@ -0,0 +1,182 @@
-+<?xml version="1.0" encoding="utf-8"?>
-+<LinearLayout
-+    xmlns:android="http://schemas.android.com/apk/res/android"
-+    xmlns:app="http://schemas.android.com/apk/res-auto"
-+    android:id="@+id/selectionBottomSheet"
-+    android:layout_width="match_parent"
-+    android:layout_height="wrap_content"
-+    android:orientation="vertical"
-+    android:paddingBottom="16dp">
-+
-+    <!-- Drag handle -->
-+    <View
-+        android:layout_width="40dp"
-+        android:layout_height="4dp"
-+        android:layout_gravity="center_horizontal"
-+        android:layout_marginTop="8dp"
-+        android:layout_marginBottom="12dp"
-+        android:background="@drawable/drag_handle_background" />
-+
-+    <!-- Header row: title + select-all toggle + clear -->
-+    <LinearLayout
-+        android:layout_width="match_parent"
-+        android:layout_height="wrap_content"
-+        android:gravity="center_vertical"
-+        android:paddingHorizontal="16dp"
-+        android:paddingBottom="8dp"
-+        android:orientation="horizontal">
-+
-+        <TextView
-+            android:id="@+id/tvSelectionCount"
-+            android:layout_width="0dp"
-+            android:layout_height="wrap_content"
-+            android:layout_weight="1"
-+            android:text="0 selected"
-+            android:textAppearance="?attr/textAppearanceTitleMedium" />
-+
-+        <CheckBox
-+            android:id="@+id/checkSelectAll"
-+            android:layout_width="wrap_content"
-+            android:layout_height="wrap_content"
-+            android:layout_marginEnd="4dp"
-+            android:text="All"
-+            android:textAppearance="?attr/textAppearanceLabelMedium" />
-+
-+        <Button
-+            android:id="@+id/btnClearSelection"
-+            style="@style/Widget.Material3.Button.TextButton"
-+            android:layout_width="wrap_content"
-+            android:layout_height="wrap_content"
-+            android:text="Clear" />
-+
-+    </LinearLayout>
-+
-+    <!-- Selected app chips -->
-+    <HorizontalScrollView
-+        android:layout_width="match_parent"
-+        android:layout_height="wrap_content"
-+        android:paddingHorizontal="12dp"
-+        android:scrollbars="none">
-+
-+        <com.google.android.material.chip.ChipGroup
-+            android:id="@+id/chipGroupSelectedApps"
-+            android:layout_width="wrap_content"
-+            android:layout_height="wrap_content"
-+            app:singleLine="true" />
-+
-+    </HorizontalScrollView>
-+
-+    <!-- Divider -->
-+    <View
-+        android:layout_width="match_parent"
-+        android:layout_height="1dp"
-+        android:layout_marginHorizontal="16dp"
-+        android:layout_marginTop="12dp"
-+        android:layout_marginBottom="4dp"
-+        android:background="?attr/colorOutlineVariant" />
-+
-+    <!-- Action buttons -->
-+    <LinearLayout
-+        android:layout_width="match_parent"
-+        android:layout_height="wrap_content"
-+        android:orientation="horizontal"
-+        android:gravity="center"
-+        android:paddingHorizontal="8dp"
-+        android:paddingTop="8dp">
-+
-+        <!-- Merge to Folder -->
-+        <LinearLayout
-+            android:id="@+id/actionMergeToFolder"
-+            android:layout_width="0dp"
-+            android:layout_height="wrap_content"
-+            android:layout_weight="1"
-+            android:orientation="vertical"
-+            android:gravity="center"
-+            android:padding="12dp"
-+            android:background="?attr/selectableItemBackground"
-+            android:clickable="true"
-+            android:focusable="true">
-+
-+            <ImageView
-+                android:layout_width="32dp"
-+                android:layout_height="32dp"
-+                android:src="@drawable/ic_create_new_folder"
-+                android:tint="?attr/colorPrimary"
-+                android:contentDescription="Merge to folder" />
-+
-+            <TextView
-+                android:layout_width="wrap_content"
-+                android:layout_height="wrap_content"
-+                android:layout_marginTop="4dp"
-+                android:text="Merge to\nFolder"
-+                android:gravity="center"
-+                android:textAppearance="?attr/textAppearanceLabelSmall"
-+                android:textColor="?attr/colorPrimary" />
-+
-+        </LinearLayout>
-+
-+        <!-- Share -->
-+        <LinearLayout
-+            android:id="@+id/actionShare"
-+            android:layout_width="0dp"
-+            android:layout_height="wrap_content"
-+            android:layout_weight="1"
-+            android:orientation="vertical"
-+            android:gravity="center"
-+            android:padding="12dp"
-+            android:background="?attr/selectableItemBackground"
-+            android:clickable="true"
-+            android:focusable="true">
-+
-+            <ImageView
-+                android:layout_width="32dp"
-+                android:layout_height="32dp"
-+                android:src="@drawable/ic_share"
-+                android:tint="?attr/colorPrimary"
-+                android:contentDescription="Share apps" />
-+
-+            <TextView
-+                android:layout_width="wrap_content"
-+                android:layout_height="wrap_content"
-+                android:layout_marginTop="4dp"
-+                android:text="Share"
-+                android:gravity="center"
-+                android:textAppearance="?attr/textAppearanceLabelSmall"
-+                android:textColor="?attr/colorPrimary" />
-+
-+        </LinearLayout>
-+
-+        <!-- Uninstall -->
-+        <LinearLayout
-+            android:id="@+id/actionUninstall"
-+            android:layout_width="0dp"
-+            android:layout_height="wrap_content"
-+            android:layout_weight="1"
-+            android:orientation="vertical"
-+            android:gravity="center"
-+            android:padding="12dp"
-+            android:background="?attr/selectableItemBackground"
-+            android:clickable="true"
-+            android:focusable="true">
-+
-+            <ImageView
-+                android:layout_width="32dp"
-+                android:layout_height="32dp"
-+                android:src="@drawable/ic_delete"
-+                android:tint="@color/error"
-+                android:contentDescription="Uninstall apps" />
-+
-+            <TextView
-+                android:layout_width="wrap_content"
-+                android:layout_height="wrap_content"
-+                android:layout_marginTop="4dp"
-+                android:text="Uninstall"
-+                android:gravity="center"
-+                android:textAppearance="?attr/textAppearanceLabelSmall"
-+                android:textColor="@color/error" />
-+
-+        </LinearLayout>
-+
-+    </LinearLayout>
-+
-+</LinearLayout>
-
-diff --git a/app/src/main/res/layout/dialog_create_folder.xml b/app/src/main/res/layout/dialog_create_folder.xml
-new file mode 100644
-index 0000000..19e7c17
---- /dev/null
-+++ b/app/src/main/res/layout/dialog_create_folder.xml
-@@ -0,0 +1,33 @@
-+<?xml version="1.0" encoding="utf-8"?>
-+<LinearLayout
-+    xmlns:android="http://schemas.android.com/apk/res/android"
-+    android:layout_width="match_parent"
-+    android:layout_height="wrap_content"
-+    android:orientation="vertical"
-+    android:padding="24dp">
-+
-+    <TextView
-+        android:layout_width="wrap_content"
-+        android:layout_height="wrap_content"
-+        android:text="New Folder Name"
-+        android:textAppearance="?attr/textAppearanceTitleMedium"
-+        android:layout_marginBottom="16dp" />
-+
-+    <com.google.android.material.textfield.TextInputLayout
-+        android:id="@+id/folderNameLayout"
-+        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-+        android:layout_width="match_parent"
-+        android:layout_height="wrap_content"
-+        android:hint="Folder name">
-+
-+        <com.google.android.material.textfield.TextInputEditText
-+            android:id="@+id/folderNameInput"
-+            android:layout_width="match_parent"
-+            android:layout_height="wrap_content"
-+            android:inputType="text"
-+            android:maxLines="1"
-+            android:imeOptions="actionDone" />
-+
-+    </com.google.android.material.textfield.TextInputLayout>
-+
-+</LinearLayout>
-
-diff --git a/app/src/main/res/xml/file_provider_paths.xml b/app/src/main/res/xml/file_provider_paths.xml
-new file mode 100644
-index 0000000..017db01
---- /dev/null
-+++ b/app/src/main/res/xml/file_provider_paths.xml
++++ b/res/xml/mods_provider_paths.xml
 @@ -0,0 +1,4 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<paths>
-+    <cache-path name="shared_apks" path="shared_apks/" />
++    <cache-path name="mods_apks" path="mods_apks/" />
 +</paths>
+
+diff --git a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+index 9c30045..d00a1c3 100644
+--- a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
++++ b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+@@ -43,77 +43,77 @@
+ import app.lawnchair.root.RootNotAvailableException
+ import app.lawnchair.theme.ThemeProvider
+ import app.lawnchair.ui.popup.LawnchairShortcut
+-import app.lawnchair.util.getThemedIconPacksInstalled
++import app.lawnchair.ui.popup.ModsShortcuts
+-import app.lawnchair.util.unsafeLazy
++import app.lawnchair.util.getThemedIconPacksInstalled
+-import com.android.launcher3.AbstractFloatingView
++import app.lawnchair.util.unsafeLazy
+-import com.android.launcher3.BaseActivity
++import com.android.launcher3.AbstractFloatingView
+-import com.android.launcher3.BubbleTextView
++import com.android.launcher3.BaseActivity
+-import com.android.launcher3.GestureNavContract
++import com.android.launcher3.BubbleTextView
+-import com.android.launcher3.LauncherAppState
++import com.android.launcher3.GestureNavContract
+-import com.android.launcher3.LauncherState
++import com.android.launcher3.LauncherAppState
+-import com.android.launcher3.R
++import com.android.launcher3.LauncherState
+-import com.android.launcher3.Utilities
++import com.android.launcher3.R
+-import com.android.launcher3.model.data.ItemInfo
++import com.android.launcher3.Utilities
+-import com.android.launcher3.popup.SystemShortcut
++import com.android.launcher3.model.data.ItemInfo
+-import com.android.launcher3.statemanager.StateManager
++import com.android.launcher3.popup.SystemShortcut
+-import com.android.launcher3.uioverrides.QuickstepLauncher
++import com.android.launcher3.statemanager.StateManager
+-import com.android.launcher3.uioverrides.states.AllAppsState
++import com.android.launcher3.uioverrides.QuickstepLauncher
+-import com.android.launcher3.uioverrides.states.OverviewState
++import com.android.launcher3.uioverrides.states.AllAppsState
+-import com.android.launcher3.util.ActivityOptionsWrapper
++import com.android.launcher3.uioverrides.states.OverviewState
+-import com.android.launcher3.util.Executors
++import com.android.launcher3.util.ActivityOptionsWrapper
+-import com.android.launcher3.util.RunnableList
++import com.android.launcher3.util.Executors
+-import com.android.launcher3.util.SystemUiController.UI_STATE_BASE_WINDOW
++import com.android.launcher3.util.RunnableList
+-import com.android.launcher3.util.Themes
++import com.android.launcher3.util.SystemUiController.UI_STATE_BASE_WINDOW
+-import com.android.launcher3.util.TouchController
++import com.android.launcher3.util.Themes
+-import com.android.launcher3.views.FloatingSurfaceView
++import com.android.launcher3.util.TouchController
+-import com.android.launcher3.widget.LauncherWidgetHolder
++import com.android.launcher3.views.FloatingSurfaceView
+-import com.android.launcher3.widget.RoundedCornerEnforcement
++import com.android.launcher3.widget.LauncherWidgetHolder
+-import com.android.systemui.plugins.shared.LauncherOverlayManager
++import com.android.launcher3.widget.RoundedCornerEnforcement
+-import com.android.systemui.shared.system.QuickStepContract
++import com.android.systemui.plugins.shared.LauncherOverlayManager
+-import com.kieronquinn.app.smartspacer.sdk.client.SmartspacerClient
++import com.android.systemui.shared.system.QuickStepContract
+-import com.patrykmichalik.opto.core.firstBlocking
++import com.kieronquinn.app.smartspacer.sdk.client.SmartspacerClient
+-import com.patrykmichalik.opto.core.onEach
++import com.patrykmichalik.opto.core.firstBlocking
+-import dev.kdrag0n.monet.theme.ColorScheme
++import com.patrykmichalik.opto.core.onEach
+-import java.util.stream.Stream
++import dev.kdrag0n.monet.theme.ColorScheme
+-import kotlinx.coroutines.flow.distinctUntilChanged
++import java.util.stream.Stream
+-import kotlinx.coroutines.flow.launchIn
++import kotlinx.coroutines.flow.distinctUntilChanged
+-import kotlinx.coroutines.flow.onEach
++import kotlinx.coroutines.flow.launchIn
+-import kotlinx.coroutines.launch
++import kotlinx.coroutines.flow.onEach
+-
++import kotlinx.coroutines.launch
+-class LawnchairLauncher : QuickstepLauncher() {
++
+-    private val defaultOverlay by unsafeLazy { OverlayCallbackImpl(this) }
++class LawnchairLauncher : QuickstepLauncher() {
+-    private val prefs by unsafeLazy { PreferenceManager.getInstance(this) }
++    private val defaultOverlay by unsafeLazy { OverlayCallbackImpl(this) }
+-    private val preferenceManager2 by unsafeLazy { PreferenceManager2.getInstance(this) }
++    private val prefs by unsafeLazy { PreferenceManager.getInstance(this) }
+-    private val insetsController by unsafeLazy { WindowInsetsControllerCompat(launcher.window, rootView) }
++    private val preferenceManager2 by unsafeLazy { PreferenceManager2.getInstance(this) }
+-    private val themeProvider by unsafeLazy { ThemeProvider.INSTANCE.get(this) }
++    private val insetsController by unsafeLazy { WindowInsetsControllerCompat(launcher.window, rootView) }
+-    private val noStatusBarStateListener = object : StateManager.StateListener<LauncherState> {
++    private val themeProvider by unsafeLazy { ThemeProvider.INSTANCE.get(this) }
+-        override fun onStateTransitionStart(toState: LauncherState) {
++    private val noStatusBarStateListener = object : StateManager.StateListener<LauncherState> {
+-            if (toState is OverviewState) {
++        override fun onStateTransitionStart(toState: LauncherState) {
+-                insetsController.show(WindowInsetsCompat.Type.statusBars())
++            if (toState is OverviewState) {
+-            }
++                insetsController.show(WindowInsetsCompat.Type.statusBars())
+-        }
++            }
+-        override fun onStateTransitionComplete(finalState: LauncherState) {
++        }
+-            if (finalState !is OverviewState) {
++        override fun onStateTransitionComplete(finalState: LauncherState) {
+-                insetsController.hide(WindowInsetsCompat.Type.statusBars())
++            if (finalState !is OverviewState) {
+-            }
++                insetsController.hide(WindowInsetsCompat.Type.statusBars())
+-        }
++            }
+-    }
++        }
+-    private val rememberPositionStateListener = object : StateManager.StateListener<LauncherState> {
++    }
+-        override fun onStateTransitionStart(toState: LauncherState) {
++    private val rememberPositionStateListener = object : StateManager.StateListener<LauncherState> {
+-            if (toState is AllAppsState) {
++        override fun onStateTransitionStart(toState: LauncherState) {
+-                mAppsView.activeRecyclerView.restoreScrollPosition()
++            if (toState is AllAppsState) {
+-            }
++                mAppsView.activeRecyclerView.restoreScrollPosition()
+-        }
++            }
+-        override fun onStateTransitionComplete(finalState: LauncherState) {}
++        }
+-    }
++        override fun onStateTransitionComplete(finalState: LauncherState) {}
+-    private lateinit var colorScheme: ColorScheme
++    }
+-    private var hasBackGesture = false
++    private lateinit var colorScheme: ColorScheme
+-
++    private var hasBackGesture = false
+-    val gestureController by unsafeLazy { GestureController(this) }
++
+-
++    val gestureController by unsafeLazy { GestureController(this) }
+-    override fun onCreate(savedInstanceState: Bundle?) {
++
+-        if (!Utilities.ATLEAST_Q) {
++    override fun onCreate(savedInstanceState: Bundle?) {
+-            enableEdgeToEdge(
++        if (!Utilities.ATLEAST_Q) {
+-                navigationBarStyle = SystemBarStyle.auto(
++            enableEdgeToEdge(
+-                    Color.TRANSPARENT,
++                navigationBarStyle = SystemBarStyle.auto(
+                     Color.TRANSPARENT,
+@@ -117,78 +116,78 @@
+                 navigationBarStyle = SystemBarStyle.auto(
+                     Color.TRANSPARENT,
+                     Color.TRANSPARENT,
+-                ),
++                    Color.TRANSPARENT,
+-            )
++                    Color.TRANSPARENT,
+-        }
++                ),
+-        layoutInflater.factory2 = LawnchairLayoutFactory(this)
++            )
+-        super.onCreate(savedInstanceState)
++        }
+-
++        layoutInflater.factory2 = LawnchairLayoutFactory(this)
+-        prefs.launcherTheme.subscribeChanges(this, ::updateTheme)
++        super.onCreate(savedInstanceState)
+-        prefs.feedProvider.subscribeChanges(this, defaultOverlay::reconnect)
++
+-        preferenceManager2.enableFeed.get().distinctUntilChanged().onEach { enable ->
++        prefs.launcherTheme.subscribeChanges(this, ::updateTheme)
+-            defaultOverlay.setEnableFeed(enable)
++        prefs.feedProvider.subscribeChanges(this, defaultOverlay::reconnect)
+-        }.launchIn(scope = lifecycleScope)
++        preferenceManager2.enableFeed.get().distinctUntilChanged().onEach { enable ->
+-
++            defaultOverlay.setEnableFeed(enable)
+-        if (prefs.autoLaunchRoot.get()) {
++        }.launchIn(scope = lifecycleScope)
+-            lifecycleScope.launch {
++
+-                try {
++        if (prefs.autoLaunchRoot.get()) {
+-                    RootHelperManager.INSTANCE.get(this@LawnchairLauncher).getService()
++            lifecycleScope.launch {
+-                } catch (_: RootNotAvailableException) {
++                try {
+-                }
++                    RootHelperManager.INSTANCE.get(this@LawnchairLauncher).getService()
+-            }
++                } catch (_: RootNotAvailableException) {
+-        }
++                }
+-
++            }
+-        preferenceManager2.showStatusBar.get().distinctUntilChanged().onEach {
++        }
+-            with(insetsController) {
++
+-                if (it) {
++        preferenceManager2.showStatusBar.get().distinctUntilChanged().onEach {
+-                    show(WindowInsetsCompat.Type.statusBars())
++            with(insetsController) {
+-                } else {
++                if (it) {
+-                    hide(WindowInsetsCompat.Type.statusBars())
++                    show(WindowInsetsCompat.Type.statusBars())
+-                }
++                } else {
+-            }
++                    hide(WindowInsetsCompat.Type.statusBars())
+-            with(launcher.stateManager) {
++                }
+-                if (it) {
++            }
+-                    removeStateListener(noStatusBarStateListener)
++            with(launcher.stateManager) {
+-                } else {
++                if (it) {
+-                    addStateListener(noStatusBarStateListener)
++                    removeStateListener(noStatusBarStateListener)
+-                }
++                } else {
+-            }
++                    addStateListener(noStatusBarStateListener)
+-        }.launchIn(scope = lifecycleScope)
++                }
+-
++            }
+-        preferenceManager2.rememberPosition.get().onEach {
++        }.launchIn(scope = lifecycleScope)
+-            with(launcher.stateManager) {
++
+-                if (it) {
++        preferenceManager2.rememberPosition.get().onEach {
+-                    addStateListener(rememberPositionStateListener)
++            with(launcher.stateManager) {
+-                } else {
++                if (it) {
+-                    removeStateListener(rememberPositionStateListener)
++                    addStateListener(rememberPositionStateListener)
+-                }
++                } else {
+-            }
++                    removeStateListener(rememberPositionStateListener)
+-        }.launchIn(scope = lifecycleScope)
++                }
+-
++            }
+-        prefs.overrideWindowCornerRadius.subscribeValues(this) {
++        }.launchIn(scope = lifecycleScope)
+-            QuickStepContract.sHasCustomCornerRadius = it
++
+-        }
++        prefs.overrideWindowCornerRadius.subscribeValues(this) {
+-        prefs.windowCornerRadius.subscribeValues(this) {
++            QuickStepContract.sHasCustomCornerRadius = it
+-            QuickStepContract.sCustomCornerRadius = it.toFloat()
++        }
+-        }
++        prefs.windowCornerRadius.subscribeValues(this) {
+-        preferenceManager2.roundedWidgets.onEach(launchIn = lifecycleScope) {
++            QuickStepContract.sCustomCornerRadius = it.toFloat()
+-            RoundedCornerEnforcement.sRoundedCornerEnabled = it
++        }
+-        }
++        preferenceManager2.roundedWidgets.onEach(launchIn = lifecycleScope) {
+-        val isWorkspaceDarkText = Themes.getAttrBoolean(this, R.attr.isWorkspaceDarkText)
++            RoundedCornerEnforcement.sRoundedCornerEnabled = it
+-        preferenceManager2.darkStatusBar.onEach(launchIn = lifecycleScope) { darkStatusBar ->
++        }
+-            systemUiController.updateUiState(UI_STATE_BASE_WINDOW, isWorkspaceDarkText || darkStatusBar)
++        val isWorkspaceDarkText = Themes.getAttrBoolean(this, R.attr.isWorkspaceDarkText)
+-        }
++        preferenceManager2.darkStatusBar.onEach(launchIn = lifecycleScope) { darkStatusBar ->
+-        preferenceManager2.backPressGestureHandler.onEach(launchIn = lifecycleScope) { handler ->
++            systemUiController.updateUiState(UI_STATE_BASE_WINDOW, isWorkspaceDarkText || darkStatusBar)
+-            hasBackGesture = handler !is GestureHandlerConfig.NoOp
++        }
+-        }
++        preferenceManager2.backPressGestureHandler.onEach(launchIn = lifecycleScope) { handler ->
+-
++            hasBackGesture = handler !is GestureHandlerConfig.NoOp
+-        // Handle update from version 12 Alpha 4 to version 12 Alpha 5.
++        }
+-        if (
++
+-            prefs.themedIcons.get() &&
++        // Handle update from version 12 Alpha 4 to version 12 Alpha 5.
+-            packageManager.getThemedIconPacksInstalled(this).isEmpty()
++        if (
+-        ) {
++            prefs.themedIcons.get() &&
+-            prefs.themedIcons.set(newValue = false)
++            packageManager.getThemedIconPacksInstalled(this).isEmpty()
+-        }
++        ) {
+-
++            prefs.themedIcons.set(newValue = false)
+-        colorScheme = themeProvider.colorScheme
++        }
+ 
+@@ -192,8 +190,8 @@
+ 
+         colorScheme = themeProvider.colorScheme
+ 
+-        showQuickstepWarningIfNecessary()
++
+-
++        colorScheme = themeProvider.colorScheme
+-        reloadIconsIfNeeded()
++
+-    }
++        showQuickstepWarningIfNecessary()
+ 
+@@ -197,157 +194,157 @@
+         reloadIconsIfNeeded()
+     }
+ 
+-    override fun collectStateHandlers(out: MutableList<StateManager.StateHandler<*>>) {
++
+-        super.collectStateHandlers(out)
++        reloadIconsIfNeeded()
+-        out.add(SearchBarStateHandler(this))
++    }
+-    }
++
+-
++    override fun collectStateHandlers(out: MutableList<StateManager.StateHandler<*>>) {
+-    override fun getSupportedShortcuts(): Stream<SystemShortcut.Factory<*>> =
++        super.collectStateHandlers(out)
+-        Stream.concat(super.getSupportedShortcuts(), Stream.of(LawnchairShortcut.UNINSTALL, LawnchairShortcut.CUSTOMIZE))
++        out.add(SearchBarStateHandler(this))
+-
++    }
+-    override fun updateTheme() {
++
+-        if (themeProvider.colorScheme != colorScheme) {
++    override fun getSupportedShortcuts(): Stream<SystemShortcut.Factory<*>> =
+-            recreate()
++        Stream.concat(
+-        } else {
++            super.getSupportedShortcuts(),
+-            super.updateTheme()
++            Stream.of(
+-        }
++                LawnchairShortcut.UNINSTALL,
+-    }
++                LawnchairShortcut.CUSTOMIZE,
+-
++                ModsShortcuts.ADVANCED_PERMISSIONS,
+-    override fun createTouchControllers(): Array<TouchController> {
++                ModsShortcuts.SHARE_APP,
+-        val verticalSwipeController = VerticalSwipeTouchController(this, gestureController)
++                ModsShortcuts.INSTALL_TO_USER,
+-        return arrayOf<TouchController>(verticalSwipeController) + super.createTouchControllers()
++                ModsShortcuts.SHOW_DATA_DIR,
+-    }
++                ModsShortcuts.SHOW_APP_DIR,
+-
++                ModsShortcuts.SELECT,
+-    override fun handleHomeTap() {
++            ),
+-        gestureController.onHomePressed()
++        )
+-    }
++
+-
++    override fun updateTheme() {
+-    override fun registerBackDispatcher() {
++        if (themeProvider.colorScheme != colorScheme) {
+-        if (LawnchairApp.isAtleastT) {
++            recreate()
+-            super.registerBackDispatcher()
++        } else {
+-        }
++            super.updateTheme()
+-    }
++        }
+-
++    }
+-    override fun handleGestureContract(intent: Intent?) {
++
+-        if (!LawnchairApp.isRecentsEnabled) {
++    override fun createTouchControllers(): Array<TouchController> {
+-            val gnc = GestureNavContract.fromIntent(intent)
++        val verticalSwipeController = VerticalSwipeTouchController(this, gestureController)
+-            if (gnc != null) {
++        return arrayOf<TouchController>(verticalSwipeController) + super.createTouchControllers()
+-                AbstractFloatingView.closeOpenViews(
++    }
+-                    this,
++
+-                    false,
++    override fun handleHomeTap() {
+-                    AbstractFloatingView.TYPE_ICON_SURFACE,
++        gestureController.onHomePressed()
+-                )
++    }
+-                FloatingSurfaceView.show(this, gnc)
++
+-            }
++    override fun registerBackDispatcher() {
+-        }
++        if (LawnchairApp.isAtleastT) {
+-    }
++            super.registerBackDispatcher()
+-
++        }
+-    override fun onUiChangedWhileSleeping() {
++    }
+-        if (Utilities.ATLEAST_S) {
++
+-            super.onUiChangedWhileSleeping()
++    override fun handleGestureContract(intent: Intent?) {
+-        }
++        if (!LawnchairApp.isRecentsEnabled) {
+-    }
++            val gnc = GestureNavContract.fromIntent(intent)
+-
++            if (gnc != null) {
+-    override fun createAppWidgetHolder(): LauncherWidgetHolder {
++                AbstractFloatingView.closeOpenViews(
+-        val factory = LauncherWidgetHolder.HolderFactory.newFactory(this) as LawnchairWidgetHolder.LawnchairHolderFactory
++                    this,
+-        return factory.newInstance(
++                    false,
+-            this,
++                    AbstractFloatingView.TYPE_ICON_SURFACE,
+-        ) { appWidgetId: Int ->
++                )
+-            workspace.removeWidget(
++                FloatingSurfaceView.show(this, gnc)
+-                appWidgetId,
++            }
+-            )
++        }
+-        }
++    }
+-    }
++
+-
++    override fun onUiChangedWhileSleeping() {
+-    override fun makeDefaultActivityOptions(splashScreenStyle: Int): ActivityOptionsWrapper {
++        if (Utilities.ATLEAST_S) {
+-        val callbacks = RunnableList()
++            super.onUiChangedWhileSleeping()
+-        val options = if (Utilities.ATLEAST_Q) {
++        }
+-            LawnchairQuickstepCompat.activityOptionsCompat.makeCustomAnimation(
++    }
+-                this,
++
+-                0,
++    override fun createAppWidgetHolder(): LauncherWidgetHolder {
+-                0,
++        val factory = LauncherWidgetHolder.HolderFactory.newFactory(this) as LawnchairWidgetHolder.LawnchairHolderFactory
+-                Executors.MAIN_EXECUTOR.handler,
++        return factory.newInstance(
+-                null,
++            this,
+-            ) {
++        ) { appWidgetId: Int ->
+-                callbacks.executeAllAndDestroy()
++            workspace.removeWidget(
+-            }
++                appWidgetId,
+-        } else {
++            )
+-            ActivityOptions.makeBasic()
++        }
+-        }
++    }
+-        if (Utilities.ATLEAST_T) {
++
+-            options.setSplashScreenStyle(splashScreenStyle)
++    override fun makeDefaultActivityOptions(splashScreenStyle: Int): ActivityOptionsWrapper {
+-        }
++        val callbacks = RunnableList()
+-
++        val options = if (Utilities.ATLEAST_Q) {
+-        Utilities.allowBGLaunch(options)
++            LawnchairQuickstepCompat.activityOptionsCompat.makeCustomAnimation(
+-        return ActivityOptionsWrapper(options, callbacks)
++                this,
+-    }
++                0,
+-
++                0,
+-    override fun getActivityLaunchOptions(v: View?, item: ItemInfo?): ActivityOptionsWrapper {
++                Executors.MAIN_EXECUTOR.handler,
+-        return runCatching {
++                null,
+-            super.getActivityLaunchOptions(v, item)
++            ) {
+-        }.getOrElse {
++                callbacks.executeAllAndDestroy()
+-            getActivityLaunchOptionsDefault(v, item)
++            }
+-        }
++        } else {
+-    }
++            ActivityOptions.makeBasic()
+-
++        }
+-    private fun getActivityLaunchOptionsDefault(v: View?, item: ItemInfo?): ActivityOptionsWrapper {
++        if (Utilities.ATLEAST_T) {
+-        var left = 0
++            options.setSplashScreenStyle(splashScreenStyle)
+-        var top = 0
++        }
+-        var width = v!!.measuredWidth
++
+-        var height = v.measuredHeight
++        Utilities.allowBGLaunch(options)
+-        if (v is BubbleTextView) {
++        return ActivityOptionsWrapper(options, callbacks)
+-            // Launch from center of icon, not entire view
++    }
+-            val icon: Drawable? = v.icon
++
+-            if (icon != null) {
++    override fun getActivityLaunchOptions(v: View?, item: ItemInfo?): ActivityOptionsWrapper {
+-                val bounds = icon.bounds
++        return runCatching {
+-                left = (width - bounds.width()) / 2
++            super.getActivityLaunchOptions(v, item)
+-                top = v.getPaddingTop()
++        }.getOrElse {
+-                width = bounds.width()
++            getActivityLaunchOptionsDefault(v, item)
+-                height = bounds.height()
++        }
+-            }
++    }
+-        }
++
+-        val options = Utilities.allowBGLaunch(
++    private fun getActivityLaunchOptionsDefault(v: View?, item: ItemInfo?): ActivityOptionsWrapper {
+-            ActivityOptions.makeClipRevealAnimation(
++        var left = 0
+-                v,
++        var top = 0
+-                left,
++        var width = v!!.measuredWidth
+-                top,
++        var height = v.measuredHeight
+-                width,
++        if (v is BubbleTextView) {
+-                height,
++            // Launch from center of icon, not entire view
+-            ),
++            val icon: Drawable? = v.icon
+-        )
++            if (icon != null) {
+-        options.setLaunchDisplayId(
++                val bounds = icon.bounds
+-            if (v != null && v.display != null) v.display.displayId else Display.DEFAULT_DISPLAY,
++                left = (width - bounds.width()) / 2
+-        )
++                top = v.getPaddingTop()
+-        val callback = RunnableList()
++                width = bounds.width()
+-        return ActivityOptionsWrapper(options, callback)
++                height = bounds.height()
+-    }
++            }
+-
++        }
+-    override fun onResume() {
++        val options = Utilities.allowBGLaunch(
+-        super.onResume()
++            ActivityOptions.makeClipRevealAnimation(
+-        restartIfPending()
++                v,
+-
++                left,
+-        dragLayer.viewTreeObserver.addOnDrawListener(object : ViewTreeObserver.OnDrawListener {
++                top,
+-            private var handled = false
++                width,
+-
++                height,
+-            override fun onDraw() {
++            ),
+-                if (handled) {
++        )
+-                    return
++        options.setLaunchDisplayId(
+-                }
++            if (v != null && v.display != null) v.display.displayId else Display.DEFAULT_DISPLAY,
+-                handled = true
++        )
+-
++        val callback = RunnableList()
+-                dragLayer.post {
++        return ActivityOptionsWrapper(options, callback)
+-                    dragLayer.viewTreeObserver.removeOnDrawListener(this)
++    }
+-                }
++
+-                depthController
++    override fun onResume() {
+-            }
++        super.onResume()
+-        })
++        restartIfPending()
+-    }
++
+-
++        dragLayer.viewTreeObserver.addOnDrawListener(object : ViewTreeObserver.OnDrawListener {
+-    override fun onDestroy() {
++            private var handled = false
+-        super.onDestroy()
++
+-        // Only actually closes if required, safe to call if not enabled
++            override fun onDraw() {
+-        SmartspacerClient.close()
++                if (handled) {
+-    }
++                    return
+-
++                }
+-    override fun getDefaultOverlay(): LauncherOverlayManager = defaultOverlay
++                handled = true
+ 
+@@ -351,50 +347,67 @@
+ 
+     override fun getDefaultOverlay(): LauncherOverlayManager = defaultOverlay
+ 
+-    fun recreateIfNotScheduled() {
++
+-        if (sRestartFlags == 0) {
++                dragLayer.post {
+-            recreate()
++                    dragLayer.viewTreeObserver.removeOnDrawListener(this)
+-        }
++                }
+-    }
++                depthController
+-
++            }
+-    private fun restartIfPending() {
++        })
+-        when {
++    }
+-            sRestartFlags and FLAG_RESTART != 0 -> lawnchairApp.restart(false)
++
+-            sRestartFlags and FLAG_RECREATE != 0 -> {
++    override fun onDestroy() {
+-                sRestartFlags = 0
++        super.onDestroy()
+-                recreate()
++        // Only actually closes if required, safe to call if not enabled
+-            }
++        SmartspacerClient.close()
+-        }
++    }
+-    }
++
+-
++    override fun getDefaultOverlay(): LauncherOverlayManager = defaultOverlay
+-    /**
++
+-     * Reloads app icons if there is an active icon pack & [PreferenceManager2.alwaysReloadIcons] is enabled.
++    fun recreateIfNotScheduled() {
+-     */
++        if (sRestartFlags == 0) {
+-    private fun reloadIconsIfNeeded() {
++            recreate()
+-        if (
++        }
+-            preferenceManager2.alwaysReloadIcons.firstBlocking() &&
++    }
+-            (prefs.iconPackPackage.get().isNotEmpty() || prefs.themedIconPackPackage.get().isNotEmpty())
++
+-        ) {
++    private fun restartIfPending() {
+-            LauncherAppState.getInstance(this).reloadIcons()
++        when {
+-        }
++            sRestartFlags and FLAG_RESTART != 0 -> lawnchairApp.restart(false)
+-    }
++            sRestartFlags and FLAG_RECREATE != 0 -> {
+-
++                sRestartFlags = 0
+-    companion object {
++                recreate()
+-        private const val FLAG_RECREATE = 1 shl 0
++            }
+-        private const val FLAG_RESTART = 1 shl 1
++        }
+-
++    }
+-        var sRestartFlags = 0
++
+-
++    /**
+-        val instance get() = LauncherAppState.getInstanceNoCreate()?.launcher as? LawnchairLauncher
++     * Reloads app icons if there is an active icon pack & [PreferenceManager2.alwaysReloadIcons] is enabled.
+-    }
++     */
+-}
++    private fun reloadIconsIfNeeded() {
+-
++        if (
+-val Context.launcher: LawnchairLauncher
++            preferenceManager2.alwaysReloadIcons.firstBlocking() &&
+-    get() = BaseActivity.fromContext(this)
++            (prefs.iconPackPackage.get().isNotEmpty() || prefs.themedIconPackPackage.get().isNotEmpty())
+-
++        ) {
+-val Context.launcherNullable: LawnchairLauncher? get() = try {
++            LauncherAppState.getInstance(this).reloadIcons()
+-    launcher
++        }
+-} catch (_: IllegalArgumentException) {
++    }
+-    null
++
+-}
++    companion object {
+-
++        private const val FLAG_RECREATE = 1 shl 0
++        private const val FLAG_RESTART = 1 shl 1
++
++        var sRestartFlags = 0
++
++        val instance get() = LauncherAppState.getInstanceNoCreate()?.launcher as? LawnchairLauncher
++    }
++}
++
++val Context.launcher: LawnchairLauncher
++    get() = BaseActivity.fromContext(this)
++
++val Context.launcherNullable: LawnchairLauncher? get() = try {
++    launcher
++} catch (_: IllegalArgumentException) {
++    null
++}
++
 
 --
 2.43.0

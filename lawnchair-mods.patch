@@ -6,6 +6,9 @@ Subject: [PATCH] Add mod shortcuts to Lawnchair long-press menu
 Registers 6 new SystemShortcut.Factory entries in getSupportedShortcuts():
   Advanced Permissions, Share App, Install to User,
   Show Data Dir, Show App Dir, Select
+
+Fix: use android.app.AlertDialog (not appcompat) so it works with
+the Launcher activity's non-AppCompat theme.
 ---
 
 diff --git a/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt b/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt
@@ -273,7 +276,7 @@ index 0000000..9c0788b
 
 diff --git a/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt b/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt
 new file mode 100644
-index 0000000..7cfd209
+index 0000000..96deeb4
 --- /dev/null
 +++ b/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt
 @@ -0,0 +1,245 @@
@@ -287,7 +290,7 @@ index 0000000..7cfd209
 +import android.view.View
 +import android.widget.EditText
 +import android.widget.Toast
-+import androidx.appcompat.app.AlertDialog
++import android.app.AlertDialog
 +import app.lawnchair.mods.AdvancedPermissionsHelper
 +import app.lawnchair.mods.ApkShareHelper
 +import app.lawnchair.mods.DrawerFolderHelper

@@ -562,7 +562,6 @@ index 9c30045..d8180fa 100644
  import app.lawnchair.util.getThemedIconPacksInstalled
  import app.lawnchair.util.unsafeLazy
  import com.android.launcher3.AbstractFloatingView
-
 @@ -203,6 +204,18 @@
      }
  
@@ -584,5 +583,5 @@ index 9c30045..d8180fa 100644
  
      override fun updateTheme() {
 
---
+-- 
 2.43.0

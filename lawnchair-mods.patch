@@ -1,65 +1,104 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Lawnchair Mods <mods@lawnchair>
 Date: Mon, 12 May 2026 00:00:00 +0000
-Subject: [PATCH] Add mod shortcuts to Lawnchair long-press menu
+Subject: [PATCH] Add mod shortcuts ported from HomeLauncher
 
-Registers 7 new SystemShortcut.Factory entries in getSupportedShortcuts():
-  Advanced Permissions, Share App, Install to User,
-  Show Data Dir, Show App Dir, Group by User Profile, Select
+Ports the working implementation from HomeLauncher to Lawnchair's
+SystemShortcut.Factory API. Key improvements over the previous patch:
 
-Fixes:
-  - Use ContextThemeWrapper(Theme_DeviceDefault_Light_Dialog_Alert) for all
-    AlertDialog.Builder calls so text/background are readable in the
-    Launcher's non-AppCompat dark theme.
-  - Show Data Dir and Show App Dir are no longer gated on hasExplorer().
-    They now always appear and show an error toast if no supported file
-    manager is installed instead of silently disappearing.
-  - Group by User Profile is now a standalone top-level shortcut (was
-    buried inside the Select action dialog and unreachable).
-  - Select now prompts the user to pick a profile first, then lists that
-    profile's apps. Work-profile / secondary-user apps are enumerated via
-    root shell (`pm list packages --user <id>`) so only user-0 apps are
-    no longer shown.
+  Advanced Permissions  — now uses Settings intents (no root needed).
+  Share App             — split-APK aware, FileProvider-based, async.
+  Install to User       — uses `pm list users` (root) to find users.
+  Show Data Dir         — no longer hidden when no browser installed;
+  Show App Dir            toast shown on tap instead.
+  Group by User Profile — uses LauncherApps API (no root needed) so
+                          work-profile apps are enumerated correctly.
+  Select                — user-profile picker first, then LauncherApps
+                          to list apps for that profile (no root needed).
+
+All dialogs use ContextThemeWrapper(Theme_DeviceDefault_Light_Dialog_Alert)
+so they show white backgrounds in Lawnchair's dark/transparent theme.
+
+NOTE: Add the following provider to AndroidManifest.xml <application>
+      for the Share App feature (APK file sharing):
+
+  <provider android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.mods.provider"
+            android:exported="false" android:grantUriPermissions="true">
+    <meta-data android:name="android.support.FILE_PROVIDER_PATHS"
+               android:resource="@xml/mods_provider_paths"/>
+  </provider>
 ---
 
-diff --git a/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt b/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt
+
+diff --git a/lawnchair/src/app/lawnchair/mods/RootUtil.kt b/lawnchair/src/app/lawnchair/mods/RootUtil.kt
 new file mode 100644
-index 0000000..fb85d43
+index 0000000..0000001
 --- /dev/null
-+++ b/lawnchair/src/app/lawnchair/mods/AdvancedPermissionsHelper.kt
-@@ -0,0 +1,19 @@
++++ b/lawnchair/src/app/lawnchair/mods/RootUtil.kt
+@@ -0,0 +1,43 @@
 +package app.lawnchair.mods
 +
-+object AdvancedPermissionsHelper {
++import android.util.Log
++import java.io.BufferedReader
++import java.io.DataOutputStream
++import java.io.InputStreamReader
 +
-+    suspend fun grantUsageStats(pkg: String) =
-+        RootCommandHelper.exec("appops set $pkg PACKAGE_USAGE_STATS allow")
++object RootUtil {
 +
-+    suspend fun grantAllFiles(pkg: String) =
-+        RootCommandHelper.exec("appops set $pkg MANAGE_EXTERNAL_STORAGE allow")
++    fun runAsRoot(vararg cmds: String): Boolean = try {
++        val p = Runtime.getRuntime().exec("su")
++        DataOutputStream(p.outputStream).use { os ->
++            cmds.forEach { os.writeBytes(it + "\n") }
++            os.writeBytes("exit\n")
++            os.flush()
++        }
++        p.waitFor() == 0
++    } catch (t: Throwable) {
++        Log.e("RootUtil", "su failed", t); false
++    }
 +
-+    suspend fun grantUnknownSources(pkg: String) =
-+        RootCommandHelper.exec("appops set $pkg REQUEST_INSTALL_PACKAGES allow")
++    fun runAsRootCapture(cmd: String): String? = try {
++        val p = Runtime.getRuntime().exec("su")
++        DataOutputStream(p.outputStream).use { os ->
++            os.writeBytes(cmd + "\n")
++            os.writeBytes("exit\n")
++            os.flush()
++        }
++        val out = BufferedReader(InputStreamReader(p.inputStream)).use { it.readText() }
++        if (p.waitFor() == 0) out else null
++    } catch (t: Throwable) {
++        Log.e("RootUtil", "su capture failed", t); null
++    }
 +
-+    suspend fun grantAll(pkg: String) = listOf(
-+        grantUsageStats(pkg),
-+        grantAllFiles(pkg),
-+        grantUnknownSources(pkg),
-+    )
++    /** Parse `pm list users` output. Lines look like: UserInfo{0:Owner:13} running */
++    fun listUsers(): List<Pair<Int, String>> {
++        val out = runAsRootCapture("pm list users") ?: return emptyList()
++        val re = Regex("""UserInfo\{(\d+):([^:}]*):""")
++        return re.findAll(out).map { m ->
++            m.groupValues[1].toInt() to m.groupValues[2].trim().ifEmpty { "User ${m.groupValues[1]}" }
++        }.toList()
++    }
 +}
 
-diff --git a/lawnchair/src/app/lawnchair/mods/ApkShareHelper.kt b/lawnchair/src/app/lawnchair/mods/ApkShareHelper.kt
+diff --git a/lawnchair/src/app/lawnchair/mods/IntentUtil.kt b/lawnchair/src/app/lawnchair/mods/IntentUtil.kt
 new file mode 100644
-index 0000000..70ac07c
+index 0000000..0000001
 --- /dev/null
-+++ b/lawnchair/src/app/lawnchair/mods/ApkShareHelper.kt
-@@ -0,0 +1,54 @@
++++ b/lawnchair/src/app/lawnchair/mods/IntentUtil.kt
+@@ -0,0 +1,189 @@
 +package app.lawnchair.mods
 +
 +import android.content.Context
 +import android.content.Intent
++import android.net.Uri
++import android.provider.Settings
++import android.view.ContextThemeWrapper
++import android.widget.Toast
 +import androidx.core.content.FileProvider
++import kotlinx.coroutines.CoroutineScope
 +import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
 +import kotlinx.coroutines.withContext
 +import java.io.File
 +import java.io.FileInputStream
@@ -67,54 +106,231 @@ index 0000000..70ac07c
 +import java.util.zip.ZipEntry
 +import java.util.zip.ZipOutputStream
 +
-+object ApkShareHelper {
++/**
++ * Ported from HomeLauncher's IntentUtil.kt.
++ * Handles root browser opening, APK sharing, and advanced permissions.
++ */
++object IntentUtil {
 +
-+    suspend fun shareApp(context: Context, packageName: String) = withContext(Dispatchers.IO) {
-+        val appInfo = context.packageManager.getApplicationInfo(packageName, 0)
-+        val splits  = appInfo.splitSourceDirs
-+        val file = if (splits.isNullOrEmpty()) {
-+            File(appInfo.sourceDir)
-+        } else {
-+            mergeToApks(context, packageName, appInfo.sourceDir, splits)
++    // Add this provider to your AndroidManifest.xml inside <application>:
++    //
++    //   <provider android:name="androidx.core.content.FileProvider"
++    //             android:authorities="${applicationId}.mods.provider"
++    //             android:exported="false"
++    //             android:grantUriPermissions="true">
++    //     <meta-data android:name="android.support.FILE_PROVIDER_PATHS"
++    //                android:resource="@xml/mods_provider_paths"/>
++    //   </provider>
++
++    private val ROOT_BROWSERS = listOf(
++        "com.mixplorer",
++        "com.mixplorer.silver",
++        "bin.mt.plus.canary",
++        "bin.mt.plus",
++    )
++
++    private fun themed(ctx: Context) =
++        ContextThemeWrapper(ctx, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
++
++    // ── Root browser ───────────────────────────────────────────────────────
++
++    private fun installedRootBrowsers(ctx: Context): List<String> =
++        ROOT_BROWSERS.filter {
++            runCatching { ctx.packageManager.getPackageInfo(it, 0); true }.getOrDefault(false)
 +        }
-+        val uri  = FileProvider.getUriForFile(context, "${context.packageName}.mods.provider", file)
-+        val mime = if (splits.isNullOrEmpty()) "application/vnd.android.package-archive"
-+                   else "application/octet-stream"
-+        val intent = Intent(Intent.ACTION_SEND).apply {
-+            type = mime
-+            putExtra(Intent.EXTRA_STREAM, uri)
-+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
++
++    /**
++     * Tries multiple MIME types to open [path] in [browserPkg].
++     * Falls back to launching the browser root + showing path as a toast.
++     * Ported from HomeLauncher's IntentUtil.launchBrowserAt().
++     */
++    private fun launchBrowserAt(ctx: Context, browserPkg: String, path: String): Boolean {
++        try { android.os.StrictMode.setVmPolicy(android.os.StrictMode.VmPolicy.Builder().build()) }
++        catch (_: Throwable) {}
++        val uri = Uri.parse("file://$path")
++        for (mime in listOf("resource/folder", "vnd.android.document/directory", "inode/directory", "*/*", null)) {
++            try {
++                ctx.startActivity(Intent(Intent.ACTION_VIEW).apply {
++                    if (mime == null) data = uri else setDataAndType(uri, mime)
++                    setPackage(browserPkg)
++                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
++                }); return true
++            } catch (_: Throwable) {}
 +        }
-+        context.startActivity(
-+            Intent.createChooser(intent, "Share APK").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-+        )
++        return try {
++            val i = ctx.packageManager.getLaunchIntentForPackage(browserPkg) ?: return false
++            ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
++            Toast.makeText(ctx, path, Toast.LENGTH_LONG).show(); true
++        } catch (_: Throwable) { false }
 +    }
 +
-+    private suspend fun mergeToApks(
-+        context: Context,
-+        pkg: String,
-+        base: String,
-+        splits: Array<String>,
-+    ): File = withContext(Dispatchers.IO) {
-+        val dir = File(context.cacheDir, "mods_apks").also { it.mkdirs() }
-+        val out = File(dir, "$pkg.apks")
-+        ZipOutputStream(FileOutputStream(out)).use { zip ->
-+            for (apk in listOf(File(base)) + splits.map { File(it) }) {
-+                zip.putNextEntry(ZipEntry(apk.name))
-+                FileInputStream(apk).copyTo(zip)
-+                zip.closeEntry()
++    fun openInRootBrowser(ctx: Context, path: String) {
++        val installed = installedRootBrowsers(ctx)
++        if (installed.isEmpty()) {
++            Toast.makeText(ctx, R.string.mods_no_root_browser, Toast.LENGTH_LONG).show(); return
++        }
++        if (installed.size == 1) {
++            if (!launchBrowserAt(ctx, installed[0], path))
++                Toast.makeText(ctx, R.string.mods_no_root_browser, Toast.LENGTH_SHORT).show()
++            return
++        }
++        val pm = ctx.packageManager
++        val labels = installed.map {
++            runCatching { pm.getApplicationInfo(it, 0).loadLabel(pm).toString() }.getOrDefault(it)
++        }.toTypedArray()
++        android.app.AlertDialog.Builder(themed(ctx))
++            .setTitle(R.string.mods_choose_root_browser)
++            .setItems(labels) { _, w -> launchBrowserAt(ctx, installed[w], path) }
++            .setNegativeButton(android.R.string.cancel, null)
++            .show()
++    }
++
++    fun openAppDataDir(ctx: Context, pkg: String) =
++        openInRootBrowser(ctx, "/data/data/$pkg")
++
++    fun openAppInstallDir(ctx: Context, pkg: String) {
++        try {
++            val parent = File(ctx.packageManager.getApplicationInfo(pkg, 0).sourceDir).parent ?: "/data/app"
++            openInRootBrowser(ctx, parent)
++        } catch (_: Throwable) { openInRootBrowser(ctx, "/data/app") }
++    }
++
++    // ── APK sharing ────────────────────────────────────────────────────────
++
++    /** Split-APK aware sharing. Runs on IO. Ported from HomeLauncher's shareApp(). */
++    fun shareApp(ctx: Context, pkg: String, label: String) {
++        Toast.makeText(ctx, R.string.mods_share_preparing, Toast.LENGTH_SHORT).show()
++        CoroutineScope(Dispatchers.IO).launch {
++            try {
++                val ai    = ctx.packageManager.getApplicationInfo(pkg, 0)
++                val splits = ai.splitSourceDirs
++                val dir   = File(ctx.cacheDir, "mods_apks").apply { mkdirs() }
++                dir.listFiles()?.forEach { runCatching { it.delete() } }
++                val name  = label.replace(Regex("[^A-Za-z0-9._-]"), "_").ifEmpty { pkg }
++                val (file, mime) = if (splits.isNullOrEmpty()) {
++                    File(dir, "$name.apk").also { File(ai.sourceDir).copyTo(it, overwrite = true) } to
++                        "application/vnd.android.package-archive"
++                } else {
++                    File(dir, "$name.apks").also { f ->
++                        ZipOutputStream(FileOutputStream(f)).use { zip ->
++                            addToZip(zip, File(ai.sourceDir), "base.apk")
++                            splits.forEach { sp -> addToZip(zip, File(sp), File(sp).name) }
++                        }
++                    } to "application/zip"
++                }
++                val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.mods.provider", file)
++                val chooser = Intent.createChooser(
++                    Intent(Intent.ACTION_SEND).apply {
++                        type = mime
++                        putExtra(Intent.EXTRA_STREAM, uri)
++                        putExtra(Intent.EXTRA_SUBJECT, label)
++                        putExtra(Intent.EXTRA_TEXT, "$label ($pkg)")
++                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
++                    },
++                    ctx.getString(R.string.mods_share_chooser)
++                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++                withContext(Dispatchers.Main) { ctx.startActivity(chooser) }
++            } catch (_: Throwable) {
++                withContext(Dispatchers.Main) {
++                    Toast.makeText(ctx, R.string.mods_share_failed, Toast.LENGTH_SHORT).show()
++                }
 +            }
 +        }
-+        out
++    }
++
++    private fun addToZip(zip: ZipOutputStream, src: File, name: String) {
++        zip.putNextEntry(ZipEntry(name)); FileInputStream(src).use { it.copyTo(zip) }; zip.closeEntry()
++    }
++
++    // ── Advanced permissions (Settings-based, no root) ─────────────────────
++
++    /**
++     * Shows a menu of Android Settings screens for special-access permissions.
++     * No root required. Ported from HomeLauncher's IntentUtil.openAdvancedPermissions().
++     */
++    fun openAdvancedPermissions(ctx: Context, pkg: String) {
++        data class Perm(val label: String, val intent: Intent)
++        fun appI(a: String) = Intent(a, Uri.parse("package:$pkg")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        fun sysI(a: String) = Intent(a).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        val api = android.os.Build.VERSION.SDK_INT
++        val items = buildList {
++            add(Perm("Usage access",            sysI(Settings.ACTION_USAGE_ACCESS_SETTINGS)))
++            if (api >= 30) add(Perm("All files access", appI(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)))
++            if (api >= 26) add(Perm("Install unknown apps", appI(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)))
++            add(Perm("Display over other apps", appI(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)))
++            add(Perm("Modify system settings",  appI(Settings.ACTION_MANAGE_WRITE_SETTINGS)))
++            add(Perm("Notification access",     sysI(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)))
++            add(Perm("Accessibility",           sysI(Settings.ACTION_ACCESSIBILITY_SETTINGS)))
++            if (api >= 23) add(Perm("Battery optimization",  sysI(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)))
++            if (api >= 23) add(Perm("Do Not Disturb access", sysI(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)))
++            if (api >= 24) add(Perm("Default apps",          sysI(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)))
++            add(Perm("App info",                appI(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)))
++        }
++        android.app.AlertDialog.Builder(themed(ctx))
++            .setTitle(R.string.mods_advanced_permissions)
++            .setItems(items.map { it.label }.toTypedArray()) { _, w ->
++                try { ctx.startActivity(items[w].intent) }
++                catch (_: Throwable) { Toast.makeText(ctx, R.string.mods_not_supported, Toast.LENGTH_SHORT).show() }
++            }
++            .setNegativeButton(android.R.string.cancel, null)
++            .show()
++    }
++}
+
+diff --git a/lawnchair/src/app/lawnchair/mods/UserHelper.kt b/lawnchair/src/app/lawnchair/mods/UserHelper.kt
+new file mode 100644
+index 0000000..0000001
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/mods/UserHelper.kt
+@@ -0,0 +1,41 @@
++package app.lawnchair.mods
++
++import android.content.Context
++import android.content.pm.LauncherApps
++import android.os.Process
++import android.os.UserHandle
++import android.os.UserManager
++
++data class UserProfile(
++    val handle: UserHandle,
++    val serial: Long,
++    val label: String,
++    val isWork: Boolean,
++)
++
++/**
++ * Enumerates user profiles and their apps via the LauncherApps API.
++ * No root needed — works for work profiles and secondary users on the same device.
++ * Ported from HomeLauncher's AppRepository.loadAll() user-profile logic.
++ */
++object UserHelper {
++
++    fun getSecondaryProfiles(context: Context): List<UserProfile> {
++        val um = context.getSystemService(Context.USER_SERVICE) as UserManager
++        val me = Process.myUserHandle()
++        return um.userProfiles
++            .filter { it != me }
++            .map { h ->
++                val serial = um.getSerialNumberForUser(h)
++                UserProfile(h, serial, "user $serial", isWork = true)
++            }
++    }
++
++    /** Returns all package names visible under [profile] via LauncherApps — no root. */
++    fun getAppsForProfile(context: Context, profile: UserProfile): List<String> {
++        val la = context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
++        return runCatching {
++            la.getActivityList(null, profile.handle).map { it.applicationInfo.packageName }.distinct()
++        }.getOrDefault(emptyList())
 +    }
 +}
 
 diff --git a/lawnchair/src/app/lawnchair/mods/DrawerFolderHelper.kt b/lawnchair/src/app/lawnchair/mods/DrawerFolderHelper.kt
 new file mode 100644
-index 0000000..0bad932
+index 0000000..0000001
 --- /dev/null
 +++ b/lawnchair/src/app/lawnchair/mods/DrawerFolderHelper.kt
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,55 @@
 +package app.lawnchair.mods
 +
 +import android.content.Context
@@ -126,32 +342,32 @@ index 0000000..0bad932
 +
 +data class DrawerFolder(val id: String, val name: String, val apps: MutableList<String> = mutableListOf())
 +
++/** Simple JSON-backed folder store for the Select and Group-by-User shortcuts. */
 +object DrawerFolderHelper {
 +
 +    private fun file(context: Context) = File(context.filesDir, "mods_drawer_folders.json")
 +
 +    suspend fun load(context: Context): List<DrawerFolder> = withContext(Dispatchers.IO) {
-+        val f = file(context)
-+        if (!f.exists()) return@withContext emptyList()
++        val f = file(context); if (!f.exists()) return@withContext emptyList()
 +        val arr = JSONArray(f.readText())
 +        (0 until arr.length()).map { i ->
-+            val o = arr.getJSONObject(i)
++            val o    = arr.getJSONObject(i)
 +            val apps = o.getJSONArray("apps")
 +            DrawerFolder(
-+                id = o.getString("id"),
++                id   = o.getString("id"),
 +                name = o.getString("name"),
 +                apps = (0 until apps.length()).map { apps.getString(it) }.toMutableList(),
 +            )
 +        }
 +    }
 +
-+    suspend fun save(context: Context, folders: List<DrawerFolder>) = withContext(Dispatchers.IO) {
++    private suspend fun save(context: Context, folders: List<DrawerFolder>) = withContext(Dispatchers.IO) {
 +        val arr = JSONArray()
-+        folders.forEach { folder ->
++        folders.forEach { f ->
 +            arr.put(JSONObject().apply {
-+                put("id", folder.id)
-+                put("name", folder.name)
-+                put("apps", JSONArray().also { a -> folder.apps.forEach { a.put(it) } })
++                put("id",   f.id)
++                put("name", f.name)
++                put("apps", JSONArray().also { a -> f.apps.forEach { a.put(it) } })
 +            })
 +        }
 +        file(context).writeText(arr.toString())
@@ -160,164 +376,39 @@ index 0000000..0bad932
 +    suspend fun createFolder(context: Context, name: String, apps: List<String>): DrawerFolder {
 +        val folders = load(context).toMutableList()
 +        val folder  = DrawerFolder("folder_${System.currentTimeMillis()}", name, apps.toMutableList())
-+        folders.add(folder)
-+        save(context, folders)
-+        return folder
++        folders += folder; save(context, folders); return folder
 +    }
 +
 +    suspend fun addToFolder(context: Context, folderId: String, apps: List<String>) {
 +        val folders = load(context).toMutableList()
-+        val i = folders.indexOfFirst { it.id == folderId }
-+        if (i < 0) return
-+        apps.forEach { pkg -> if (pkg !in folders[i].apps) folders[i].apps.add(pkg) }
++        val i = folders.indexOfFirst { it.id == folderId }; if (i < 0) return
++        apps.forEach { p -> if (p !in folders[i].apps) folders[i].apps += p }
 +        save(context, folders)
 +    }
 +}
 
-diff --git a/lawnchair/src/app/lawnchair/mods/MultiUserHelper.kt b/lawnchair/src/app/lawnchair/mods/MultiUserHelper.kt
-new file mode 100644
-index 0000000..d4f8a21
---- /dev/null
-+++ b/lawnchair/src/app/lawnchair/mods/MultiUserHelper.kt
-@@ -0,0 +1,28 @@
-+package app.lawnchair.mods
-+
-+import android.content.Context
-+import android.os.UserManager
-+
-+data class UserInfo(val id: Int, val name: String)
-+
-+object MultiUserHelper {
-+
-+    fun getSecondaryUsers(context: Context): List<UserInfo> {
-+        val um = context.getSystemService(Context.USER_SERVICE) as UserManager
-+        return um.userProfiles
-+            .filter { it.identifier != 0 }
-+            .map { UserInfo(it.identifier, "user ${it.identifier}") }
-+    }
-+
-+    suspend fun installToUser(packageName: String, userId: Int): RootCommandHelper.RootResult =
-+        RootCommandHelper.exec("pm install-existing --user $userId $packageName")
-+
-+    /** Returns all package names installed for [userId] via root shell. */
-+    suspend fun getAppsForUser(userId: Int): List<String> {
-+        val result = RootCommandHelper.exec("pm list packages --user $userId")
-+        if (!result.success) return emptyList()
-+        return result.output.lines()
-+            .filter { it.startsWith("package:") }
-+            .map { it.removePrefix("package:").trim() }
-+    }
-+}
-
-diff --git a/lawnchair/src/app/lawnchair/mods/RootCommandHelper.kt b/lawnchair/src/app/lawnchair/mods/RootCommandHelper.kt
-new file mode 100644
-index 0000000..c2d142c
---- /dev/null
-+++ b/lawnchair/src/app/lawnchair/mods/RootCommandHelper.kt
-@@ -0,0 +1,30 @@
-+package app.lawnchair.mods
-+
-+import kotlinx.coroutines.Dispatchers
-+import kotlinx.coroutines.withContext
-+import java.io.BufferedReader
-+import java.io.InputStreamReader
-+import java.io.OutputStreamWriter
-+
-+object RootCommandHelper {
-+
-+    data class RootResult(val output: String, val error: String, val exitCode: Int) {
-+        val success get() = exitCode == 0
-+    }
-+
-+    suspend fun exec(vararg commands: String): RootResult = withContext(Dispatchers.IO) {
-+        try {
-+            val process = Runtime.getRuntime().exec("su")
-+            val writer = OutputStreamWriter(process.outputStream)
-+            for (cmd in commands) writer.write("$cmd\n")
-+            writer.write("exit\n")
-+            writer.flush()
-+            writer.close()
-+            val output = BufferedReader(InputStreamReader(process.inputStream)).readText().trim()
-+            val error  = BufferedReader(InputStreamReader(process.errorStream)).readText().trim()
-+            RootResult(output, error, process.waitFor())
-+        } catch (e: Exception) {
-+            RootResult("", e.message ?: "Unknown error", -1)
-+        }
-+    }
-+}
-
-diff --git a/lawnchair/src/app/lawnchair/mods/RootExplorerHelper.kt b/lawnchair/src/app/lawnchair/mods/RootExplorerHelper.kt
-new file mode 100644
-index 0000000..9c0788b
---- /dev/null
-+++ b/lawnchair/src/app/lawnchair/mods/RootExplorerHelper.kt
-@@ -0,0 +1,41 @@
-+package app.lawnchair.mods
-+
-+import android.content.Context
-+import android.content.Intent
-+import android.net.Uri
-+
-+object RootExplorerHelper {
-+
-+    private val EXPLORERS = listOf(
-+        "com.mixplorer",
-+        "com.mixplorer.silver",
-+        "bin.mt.plus.canary",
-+        "bin.mt.plus",
-+    )
-+
-+    fun openPath(context: Context, path: String) {
-+        val explorer = findExplorer(context)
-+            ?: throw IllegalStateException("No supported root explorer installed (MiXplorer / MT Manager)")
-+        val intent = Intent(Intent.ACTION_VIEW).apply {
-+            setPackage(explorer)
-+            data = Uri.parse("file://$path")
-+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-+        }
-+        context.startActivity(intent)
-+    }
-+
-+    fun openDataDir(context: Context, packageName: String) =
-+        openPath(context, "/data/data/$packageName")
-+
-+    fun openAppDir(context: Context, packageName: String) {
-+        val apk = context.packageManager.getApplicationInfo(packageName, 0).publicSourceDir
-+        openPath(context, apk)
-+    }
-+
-+    fun findExplorer(context: Context): String? =
-+        EXPLORERS.firstOrNull {
-+            runCatching { context.packageManager.getPackageInfo(it, 0) }.isSuccess
-+        }
-+
-+    fun hasExplorer(context: Context) = findExplorer(context) != null
-+}
-
 diff --git a/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt b/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt
 new file mode 100644
-index 0000000..b7e4f91
+index 0000000..0000001
 --- /dev/null
 +++ b/lawnchair/src/app/lawnchair/ui/popup/ModsShortcuts.kt
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,340 @@
 +package app.lawnchair.ui.popup
 +
++import android.app.AlertDialog
 +import android.content.Context
 +import android.content.Intent
-+import android.content.pm.ApplicationInfo
-+import android.content.pm.PackageManager
 +import android.net.Uri
 +import android.view.ContextThemeWrapper
 +import android.view.View
 +import android.widget.EditText
 +import android.widget.Toast
-+import android.app.AlertDialog
-+import app.lawnchair.mods.AdvancedPermissionsHelper
-+import app.lawnchair.mods.ApkShareHelper
++import app.lawnchair.mods.DrawerFolder
 +import app.lawnchair.mods.DrawerFolderHelper
-+import app.lawnchair.mods.MultiUserHelper
-+import app.lawnchair.mods.RootExplorerHelper
-+import app.lawnchair.mods.UserInfo
++import app.lawnchair.mods.IntentUtil
++import app.lawnchair.mods.RootUtil
++import app.lawnchair.mods.UserHelper
++import app.lawnchair.mods.UserProfile
 +import com.android.launcher3.Launcher
 +import com.android.launcher3.R
 +import com.android.launcher3.model.data.ItemInfo
@@ -333,16 +424,21 @@ index 0000000..b7e4f91
 +    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 +
 +    /**
-+     * Wraps [ctx] with Theme_DeviceDefault_Light_Dialog_Alert so every
-+     * AlertDialog has a white background with dark text, regardless of
-+     * the Launcher activity's own dark/opaque theme.
++     * All AlertDialog.Builder calls use this wrapper so dialogs render with a
++     * light background and dark text even inside Lawnchair's dark/opaque theme.
++     * Ported from HomeLauncher's AppContextMenu.themed().
 +     */
-+    private fun alertBuilder(ctx: Context) =
-+        AlertDialog.Builder(
-+            ContextThemeWrapper(ctx, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
-+        )
++    private fun themed(ctx: Context) =
++        ContextThemeWrapper(ctx, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
++
++    private fun alertBuilder(ctx: Context) = AlertDialog.Builder(themed(ctx))
++
++    private fun toast(ctx: Context, msg: String) =
++        Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
 +
 +    // ─── Advanced Permissions ────────────────────────────────────────────────
++    // Ported from HomeLauncher IntentUtil.openAdvancedPermissions():
++    // opens Android Settings screens — no root required.
 +
 +    val ADVANCED_PERMISSIONS = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
 +        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
@@ -352,27 +448,13 @@ index 0000000..b7e4f91
 +    private class AdvancedPermissionsShortcut(
 +        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
 +    ) : SystemShortcut<Launcher>(R.drawable.ic_info_no_shadow, R.string.mods_advanced_permissions, launcher, itemInfo, view) {
-+
-+        override fun onClick(v: View) {
-+            alertBuilder(mTarget)
-+                .setTitle("Advanced Permissions")
-+                .setItems(arrayOf("Grant Usage Stats", "Grant Access All Files", "Grant Unknown Sources", "Grant All")) { _, which ->
-+                    scope.launch {
-+                        val results = when (which) {
-+                            0 -> listOf(AdvancedPermissionsHelper.grantUsageStats(pkg))
-+                            1 -> listOf(AdvancedPermissionsHelper.grantAllFiles(pkg))
-+                            2 -> listOf(AdvancedPermissionsHelper.grantUnknownSources(pkg))
-+                            else -> AdvancedPermissionsHelper.grantAll(pkg)
-+                        }
-+                        val ok = results.all { it.success }
-+                        toast(mTarget, if (ok) "Permissions granted" else "Failed: ${results.firstOrNull { !it.success }?.error}")
-+                    }
-+                }
-+                .show()
-+        }
++        override fun onClick(v: View) { IntentUtil.openAdvancedPermissions(mTarget, pkg) }
 +    }
 +
 +    // ─── Share App ───────────────────────────────────────────────────────────
++    // Ported from HomeLauncher IntentUtil.shareApp():
++    // split-APK aware, FileProvider-based, runs on IO coroutine.
++    // Requires the mods.provider entry in AndroidManifest.xml (see IntentUtil).
 +
 +    val SHARE_APP = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
 +        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
@@ -382,46 +464,61 @@ index 0000000..b7e4f91
 +    private class ShareAppShortcut(
 +        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
 +    ) : SystemShortcut<Launcher>(R.drawable.ic_install_no_shadow, R.string.mods_share_app, launcher, itemInfo, view) {
-+
 +        override fun onClick(v: View) {
-+            scope.launch {
-+                runCatching { ApkShareHelper.shareApp(mTarget, pkg) }
-+                    .onFailure { toast(mTarget, "Share failed: ${it.message}") }
-+            }
++            val label = runCatching {
++                mTarget.packageManager.getApplicationLabel(
++                    mTarget.packageManager.getApplicationInfo(pkg, 0)
++                ).toString()
++            }.getOrDefault(pkg)
++            IntentUtil.shareApp(mTarget, pkg, label)
 +        }
 +    }
 +
 +    // ─── Install to Another User ─────────────────────────────────────────────
++    // Ported from HomeLauncher AppContextMenu.installToOtherUser():
++    // reads users via `pm list users` (root), installs via `pm install-existing`.
++    // Only shown when root can enumerate at least one additional user.
 +
 +    val INSTALL_TO_USER = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
-+        val pkg   = itemInfo.targetComponent?.packageName ?: return@Factory null
-+        val users = MultiUserHelper.getSecondaryUsers(launcher)
-+        if (users.isEmpty()) return@Factory null
-+        InstallToUserShortcut(launcher, itemInfo, view, pkg, users)
++        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
++        InstallToUserShortcut(launcher, itemInfo, view, pkg)
 +    }
 +
 +    private class InstallToUserShortcut(
-+        launcher: Launcher, itemInfo: ItemInfo, view: View,
-+        private val pkg: String, private val users: List<UserInfo>,
++        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
 +    ) : SystemShortcut<Launcher>(R.drawable.ic_install_no_shadow, R.string.mods_install_to_user, launcher, itemInfo, view) {
-+
 +        override fun onClick(v: View) {
-+            alertBuilder(mTarget)
-+                .setTitle("Install to User")
-+                .setItems(users.map { it.name }.toTypedArray()) { _, which ->
-+                    val user = users[which]
-+                    scope.launch {
-+                        val result = MultiUserHelper.installToUser(pkg, user.id)
-+                        toast(mTarget, if (result.success) "Installed to ${user.name}" else "Failed: ${result.error}")
++            val ctx = mTarget
++            scope.launch(Dispatchers.IO) {
++                val users = RootUtil.listUsers()
++                withContext(Dispatchers.Main) {
++                    if (users.isEmpty()) {
++                        toast(ctx, "Could not read user list — is root (su) granted?")
++                        return@withContext
 +                    }
++                    val labels = users.map { "${it.second}  (id=${it.first})" }.toTypedArray()
++                    alertBuilder(ctx)
++                        .setTitle(R.string.mods_install_to_user)
++                        .setItems(labels) { _, which ->
++                            val (userId, userName) = users[which]
++                            scope.launch(Dispatchers.IO) {
++                                val ok = RootUtil.runAsRoot("pm install-existing --user $userId $pkg")
++                                withContext(Dispatchers.Main) {
++                                    toast(ctx, if (ok) "Installed to $userName" else "Install failed (root required)")
++                                }
++                            }
++                        }
++                        .setNegativeButton(android.R.string.cancel, null)
++                        .show()
 +                }
-+                .show()
++            }
 +        }
 +    }
 +
 +    // ─── Show Data Dir ───────────────────────────────────────────────────────
-+    // Fix: no longer gated on hasExplorer() — always shown; shows an error
-+    // toast on tap when no supported file manager is installed.
++    // Ported from HomeLauncher IntentUtil.openAppDataDir():
++    // always shown — if no supported root browser is installed an error toast
++    // appears on tap instead of silently hiding the shortcut.
 +
 +    val SHOW_DATA_DIR = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
 +        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
@@ -431,16 +528,12 @@ index 0000000..b7e4f91
 +    private class ShowDataDirShortcut(
 +        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
 +    ) : SystemShortcut<Launcher>(R.drawable.ic_info_no_shadow, R.string.mods_show_data_dir, launcher, itemInfo, view) {
-+
-+        override fun onClick(v: View) {
-+            runCatching { RootExplorerHelper.openDataDir(mTarget, pkg) }
-+                .onFailure { toast(mTarget, "Error: ${it.message}") }
-+        }
++        override fun onClick(v: View) { IntentUtil.openAppDataDir(mTarget, pkg) }
 +    }
 +
 +    // ─── Show App Dir ────────────────────────────────────────────────────────
-+    // Fix: no longer gated on hasExplorer() — always shown; shows an error
-+    // toast on tap when no supported file manager is installed.
++    // Ported from HomeLauncher IntentUtil.openAppInstallDir():
++    // resolves the parent of the APK source dir before opening the browser.
 +
 +    val SHOW_APP_DIR = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
 +        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
@@ -450,51 +543,50 @@ index 0000000..b7e4f91
 +    private class ShowAppDirShortcut(
 +        launcher: Launcher, itemInfo: ItemInfo, view: View, private val pkg: String,
 +    ) : SystemShortcut<Launcher>(R.drawable.ic_install_no_shadow, R.string.mods_show_app_dir, launcher, itemInfo, view) {
-+
-+        override fun onClick(v: View) {
-+            runCatching { RootExplorerHelper.openAppDir(mTarget, pkg) }
-+                .onFailure { toast(mTarget, "Error: ${it.message}") }
-+        }
++        override fun onClick(v: View) { IntentUtil.openAppInstallDir(mTarget, pkg) }
 +    }
 +
 +    // ─── Group by User Profile ───────────────────────────────────────────────
-+    // Fix: now a standalone top-level shortcut (was buried inside Select and
-+    // therefore unreachable). Only shown when secondary users / work profiles
-+    // exist. Uses root to enumerate each user's packages and creates one
-+    // DrawerFolder named "user <id>" per profile.
++    // Uses LauncherApps API (no root) to enumerate work-profile / secondary-user
++    // apps, then creates one DrawerFolder per profile.
++    // Ported from HomeLauncher AppRepository.groupByUser() + DesktopStore.
 +
 +    val GROUP_BY_USER = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
-+        val users = MultiUserHelper.getSecondaryUsers(launcher)
-+        if (users.isEmpty()) return@Factory null
-+        GroupByUserShortcut(launcher, itemInfo, view, users)
++        val profiles = UserHelper.getSecondaryProfiles(launcher)
++        if (profiles.isEmpty()) return@Factory null
++        GroupByUserShortcut(launcher, itemInfo, view, profiles)
 +    }
 +
 +    private class GroupByUserShortcut(
 +        launcher: Launcher, itemInfo: ItemInfo, view: View,
-+        private val users: List<UserInfo>,
++        private val profiles: List<UserProfile>,
 +    ) : SystemShortcut<Launcher>(R.drawable.ic_install_no_shadow, R.string.mods_group_by_user, launcher, itemInfo, view) {
-+
 +        override fun onClick(v: View) {
 +            val ctx = mTarget
 +            scope.launch {
 +                var created = 0
-+                users.forEach { user ->
-+                    val apps = MultiUserHelper.getAppsForUser(user.id).filter { it.isNotBlank() }
++                profiles.forEach { profile ->
++                    val apps = UserHelper.getAppsForProfile(ctx, profile)
 +                    if (apps.isNotEmpty()) {
-+                        DrawerFolderHelper.createFolder(ctx, user.name, apps)
++                        DrawerFolderHelper.createFolder(ctx, profile.label, apps)
 +                        created++
 +                    }
 +                }
 +                toast(
 +                    ctx,
 +                    if (created > 0) "Created $created folder(s) for user profiles"
-+                    else "No apps found for user profiles (root may be required)"
++                    else "No apps found for secondary profiles"
 +                )
 +            }
 +        }
 +    }
 +
 +    // ─── Select ──────────────────────────────────────────────────────────────
++    // Ported from HomeLauncher's multi-select flow:
++    //   1. If secondary profiles exist, pick a profile first.
++    //   2. Load that profile's apps via LauncherApps (no root needed).
++    //   3. Show a multi-choice dialog with the app list.
++    //   4. On "Next", offer: Merge to Folder, Share, or Uninstall.
 +
 +    val SELECT = SystemShortcut.Factory<Launcher> { launcher, itemInfo, view ->
 +        val pkg = itemInfo.targetComponent?.packageName ?: return@Factory null
@@ -507,92 +599,95 @@ index 0000000..b7e4f91
 +
 +        override fun onClick(v: View) {
 +            val ctx = mTarget
-+            val users = MultiUserHelper.getSecondaryUsers(ctx)
-+            if (users.isEmpty()) {
-+                showAppListForUser(ctx, 0, null)
++            val profiles = UserHelper.getSecondaryProfiles(ctx)
++            if (profiles.isEmpty()) {
++                showAppListForPrimary(ctx)
 +            } else {
-+                // Fix: pick a user profile first so secondary-user apps are visible.
-+                val entries = (listOf("Primary User (user 0)") + users.map { it.name }).toTypedArray()
++                val entries = (listOf("Primary User") + profiles.map { it.label }).toTypedArray()
 +                alertBuilder(ctx)
 +                    .setTitle("Select User Profile")
 +                    .setItems(entries) { _, which ->
-+                        if (which == 0) showAppListForUser(ctx, 0, null)
-+                        else showAppListForUser(ctx, users[which - 1].id, users[which - 1].name)
++                        if (which == 0) showAppListForPrimary(ctx)
++                        else showAppListForProfile(ctx, profiles[which - 1])
 +                    }
 +                    .show()
 +            }
 +        }
 +
-+        /**
-+         * Fix: loads the app list for [userId].
-+         *  - userId 0  → PackageManager.getInstalledApplications() with MATCH_ALL.
-+         *  - Other ids → root shell `pm list packages --user <id>` so work-profile
-+         *    and secondary-user apps are properly enumerated.
-+         */
-+        private fun showAppListForUser(ctx: Context, userId: Int, userName: String?) {
-+            scope.launch {
++        /** Primary user: use PackageManager (no root, no LauncherApps needed). */
++        private fun showAppListForPrimary(ctx: Context) {
++            scope.launch(Dispatchers.IO) {
 +                val pm = ctx.packageManager
-+                val appPairs: List<Pair<String, String>> = if (userId == 0) {
-+                    @Suppress("DEPRECATION")
-+                    pm.getInstalledApplications(PackageManager.GET_META_DATA or PackageManager.MATCH_ALL)
-+                        .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 }
-+                        .sortedBy { pm.getApplicationLabel(it).toString() }
-+                        .map { Pair(it.packageName, pm.getApplicationLabel(it).toString()) }
-+                } else {
-+                    MultiUserHelper.getAppsForUser(userId)
-+                        .filter { it.isNotBlank() }
-+                        .map { p ->
-+                            val label = runCatching {
-+                                pm.getApplicationLabel(pm.getApplicationInfo(p, 0)).toString()
-+                            }.getOrDefault(p)
-+                            Pair(p, label)
-+                        }
-+                        .sortedBy { it.second }
-+                }
-+
-+                withContext(Dispatchers.Main) {
-+                    if (appPairs.isEmpty()) {
-+                        toast(ctx, "No apps found${if (userName != null) " for $userName" else ""}")
-+                        return@withContext
-+                    }
-+                    val labels  = appPairs.map { it.second }.toTypedArray()
-+                    val pkgList = appPairs.map { it.first }
-+                    val checked = BooleanArray(appPairs.size) { appPairs[it].first == pkg }
-+
-+                    alertBuilder(ctx)
-+                        .setTitle("Select Apps${if (userName != null) " ($userName)" else ""}")
-+                        .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
-+                            checked[which] = isChecked
-+                        }
-+                        .setPositiveButton("Next") { _, _ ->
-+                            val selected = pkgList.filterIndexed { i, _ -> checked[i] }
-+                            if (selected.isNotEmpty()) showActionDialog(ctx, selected)
-+                        }
-+                        .setNegativeButton("Cancel", null)
-+                        .show()
-+                }
++                val apps = pm.getInstalledApplications(android.content.pm.PackageManager.MATCH_ALL)
++                    .filter { it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM == 0 }
++                    .sortedBy { pm.getApplicationLabel(it).toString() }
++                    .map { it.packageName to pm.getApplicationLabel(it).toString() }
++                withContext(Dispatchers.Main) { showSelectionDialog(ctx, apps, null) }
 +            }
 +        }
 +
-+        private fun showActionDialog(ctx: Context, selected: List<String>) {
-+            val count = selected.size
++        /**
++         * Secondary user / work profile: use LauncherApps.getActivityList() —
++         * no root required. Ported from HomeLauncher AppRepository.loadAll().
++         */
++        private fun showAppListForProfile(ctx: Context, profile: UserProfile) {
++            scope.launch(Dispatchers.IO) {
++                val pm = ctx.packageManager
++                val pkgs = UserHelper.getAppsForProfile(ctx, profile)
++                val apps = pkgs
++                    .map { p ->
++                        val label = runCatching {
++                            pm.getApplicationLabel(pm.getApplicationInfo(p, 0)).toString()
++                        }.getOrDefault(p)
++                        p to label
++                    }
++                    .sortedBy { it.second }
++                withContext(Dispatchers.Main) { showSelectionDialog(ctx, apps, profile.label) }
++            }
++        }
++
++        private fun showSelectionDialog(
++            ctx: Context,
++            apps: List<Pair<String, String>>,
++            profileLabel: String?,
++        ) {
++            if (apps.isEmpty()) {
++                toast(ctx, "No apps found${if (profileLabel != null) " for $profileLabel" else ""}")
++                return
++            }
++            val labels  = apps.map { it.second }.toTypedArray()
++            val pkgs    = apps.map { it.first }
++            val checked = BooleanArray(apps.size) { apps[it].first == pkg }
 +            alertBuilder(ctx)
-+                .setTitle("$count app${if (count == 1) "" else "s"} selected")
-+                .setItems(arrayOf("Merge to Folder", "Share", "Uninstall")) { _, which ->
++                .setTitle("Select Apps${if (profileLabel != null) " ($profileLabel)" else ""}")
++                .setMultiChoiceItems(labels, checked) { _, i, v -> checked[i] = v }
++                .setPositiveButton("Next") { _, _ ->
++                    val selected = pkgs.filterIndexed { i, _ -> checked[i] }
++                    if (selected.isNotEmpty()) showActionDialog(ctx, selected)
++                }
++                .setNegativeButton(android.R.string.cancel, null)
++                .show()
++        }
++
++        private fun showActionDialog(ctx: Context, selected: List<String>) {
++            alertBuilder(ctx)
++                .setTitle("${selected.size} app${if (selected.size == 1) "" else "s"} selected")
++                .setItems(arrayOf("Merge to Folder", "Share All", "Uninstall All")) { _, which ->
 +                    when (which) {
 +                        0 -> showMergeDialog(ctx, selected)
-+                        1 -> scope.launch {
-+                            selected.forEach { p ->
-+                                runCatching { ApkShareHelper.shareApp(ctx, p) }
-+                                    .onFailure { toast(ctx, "Share failed for $p") }
-+                            }
++                        1 -> selected.forEach { p ->
++                            val label = runCatching {
++                                ctx.packageManager.getApplicationLabel(
++                                    ctx.packageManager.getApplicationInfo(p, 0)
++                                ).toString()
++                            }.getOrDefault(p)
++                            IntentUtil.shareApp(ctx, p, label)
 +                        }
 +                        2 -> selected.forEach { p ->
-+                            ctx.startActivity(Intent(Intent.ACTION_UNINSTALL_PACKAGE).apply {
-+                                data = Uri.parse("package:$p")
-+                                putExtra(Intent.EXTRA_RETURN_RESULT, true)
-+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-+                            })
++                            ctx.startActivity(
++                                Intent(Intent.ACTION_DELETE, Uri.parse("package:$p"))
++                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++                            )
 +                        }
 +                    }
 +                }
@@ -607,13 +702,11 @@ index 0000000..b7e4f91
 +                    alertBuilder(ctx)
 +                        .setTitle("Merge to Folder")
 +                        .setItems(options) { _, which ->
-+                            if (which == 0) {
-+                                showCreateFolderDialog(ctx, selected)
-+                            } else {
-+                                val folder = existing[which - 1]
-+                                scope.launch {
-+                                    DrawerFolderHelper.addToFolder(ctx, folder.id, selected)
-+                                    toast(ctx, "Added to \"${folder.name}\"")
++                            if (which == 0) showCreateFolderDialog(ctx, selected)
++                            else scope.launch {
++                                DrawerFolderHelper.addToFolder(ctx, existing[which - 1].id, selected)
++                                withContext(Dispatchers.Main) {
++                                    toast(ctx, "Added to \"${existing[which - 1].name}\"")
 +                                }
 +                            }
 +                        }
@@ -623,9 +716,7 @@ index 0000000..b7e4f91
 +        }
 +
 +        private fun showCreateFolderDialog(ctx: Context, selected: List<String>) {
-+            val input = EditText(
-+                ContextThemeWrapper(ctx, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
-+            ).apply { hint = "Folder name" }
++            val input = EditText(themed(ctx)).apply { hint = "Folder name" }
 +            alertBuilder(ctx)
 +                .setTitle("New Folder")
 +                .setView(input)
@@ -634,24 +725,21 @@ index 0000000..b7e4f91
 +                    if (name.isEmpty()) { toast(ctx, "Name cannot be empty"); return@setPositiveButton }
 +                    scope.launch {
 +                        DrawerFolderHelper.createFolder(ctx, name, selected)
-+                        toast(ctx, "Folder \"$name\" created")
++                        withContext(Dispatchers.Main) { toast(ctx, "Folder \"$name\" created") }
 +                    }
 +                }
-+                .setNegativeButton("Cancel", null)
++                .setNegativeButton(android.R.string.cancel, null)
 +                .show()
 +        }
 +    }
-+
-+    private fun toast(ctx: Context, msg: String) =
-+        Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
 +}
 
 diff --git a/res/values/mods_strings.xml b/res/values/mods_strings.xml
 new file mode 100644
-index 0000000..4a8c3b0
+index 0000000..0000001
 --- /dev/null
 +++ b/res/values/mods_strings.xml
-@@ -0,0 +1,10 @@
+@@ -0,0 +1,16 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<resources>
 +    <string name="mods_advanced_permissions">Advanced Permissions</string>
@@ -659,13 +747,19 @@ index 0000000..4a8c3b0
 +    <string name="mods_install_to_user">Install to User</string>
 +    <string name="mods_show_data_dir">Show Data Dir</string>
 +    <string name="mods_show_app_dir">Show App Dir</string>
-+    <string name="mods_select">Select</string>
 +    <string name="mods_group_by_user">Group by User Profile</string>
++    <string name="mods_select">Select</string>
++    <string name="mods_no_root_browser">No supported root browser installed (MiXplorer / MT Manager)</string>
++    <string name="mods_choose_root_browser">Choose file manager</string>
++    <string name="mods_share_preparing">Preparing file…</string>
++    <string name="mods_share_chooser">Share APK via</string>
++    <string name="mods_share_failed">Share failed</string>
++    <string name="mods_not_supported">Not supported on this device</string>
 +</resources>
 
 diff --git a/res/xml/mods_provider_paths.xml b/res/xml/mods_provider_paths.xml
 new file mode 100644
-index 0000000..493bf9a
+index 0000000..0000001
 --- /dev/null
 +++ b/res/xml/mods_provider_paths.xml
 @@ -0,0 +1,4 @@
@@ -707,6 +801,7 @@ index 9c30045..e1b2fa2 100644
 +        )
  
      override fun updateTheme() {
+
 
 -- 
 2.43.0

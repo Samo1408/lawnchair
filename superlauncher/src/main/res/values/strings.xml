@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Super Launcher</string>
+    <string name="super_features_title">Super Launcher Features</string>
+    <string name="multi_user_feature">Multi-User App Management</string>
+    <string name="multi_user_desc">Install apps to other users, manage per-user app folders</string>
+    <string name="desktop_mode_feature">Desktop Mode (Xiaomi-style)</string>
+    <string name="desktop_mode_desc">All apps on desktop pages with folder organization</string>
+    <string name="hijri_calendar_feature">Hijri Calendar</string>
+    <string name="hijri_calendar_desc">Display Hijri (Islamic) date alongside Gregorian</string>
+    <string name="network_monitor_feature">Network Speed Monitor</string>
+    <string name="network_monitor_desc">Real-time download/upload speed display</string>
+    <string name="font_system_feature">Arabic Font System</string>
+    <string name="font_system_desc">16 Arabic-compatible fonts with download support</string>
+    <string name="notification_badge_feature">Notification Badges</string>
+    <string name="notification_badge_desc">Per-app notification count badges</string>
+    <string name="root_features_feature">Root-Enhanced Features</string>
+    <string name="root_features_desc">Double-tap lock, multi-user install, advanced uninstall</string>
+    <string name="backup_feature">Layout Backup &amp; Restore</string>
+    <string name="backup_desc">Export/import desktop layout, folders, and widgets</string>
+    <string name="apk_sharing_feature">APK Sharing</string>
+    <string name="apk_sharing_desc">Share installed apps as APK files (supports split APKs)</string>
+    <string name="context_menu_feature">Enhanced Context Menu</string>
+    <string name="context_menu_desc">App info, uninstall, share, install to other users, merge into folders</string>
+</resources>

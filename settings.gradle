@@ -118,3 +118,4 @@ include ':concurrent'
 //include ':compose'
 include ':modules:widgetpicker'
 
+include ':superlauncher'

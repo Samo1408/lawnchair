@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="hl_advanced_permissions">Advanced Permissions</string>
+    <string name="hl_share_app">Share App</string>
+    <string name="hl_install_to_user">Install to Another User</string>
+    <string name="hl_show_data_dir">Show Data Directory</string>
+    <string name="hl_show_app_dir">Show App Directory</string>
+    <string name="hl_select">Select</string>
+    <string name="hl_action_create_folder">Create Folder</string>
+    <string name="hl_action_uninstall">Uninstall</string>
+    <string name="hl_action_share">Share</string>
+    <string name="hl_action_close">Close</string>
+    <string name="hl_profile_folder">Profile Folder</string>
+    <string name="hl_work_tab">Work</string>
+    <string name="hl_personal_tab">Personal</string>
+    <string name="hl_no_root_explorer">No root explorer found</string>
+    <string name="hl_root_required">Root access required</string>
+</resources>

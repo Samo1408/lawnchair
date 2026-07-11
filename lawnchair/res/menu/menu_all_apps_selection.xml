@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item android:id="@+id/action_create_folder" android:title="@string/hl_action_create_folder" android:icon="@drawable/ic_folder" app:showAsAction="always" />
+    <item android:id="@+id/action_uninstall" android:title="@string/hl_action_uninstall" android:icon="@drawable/ic_uninstall_no_shadow" app:showAsAction="always" />
+    <item android:id="@+id/action_share" android:title="@string/hl_action_share" android:icon="@drawable/ic_share" app:showAsAction="ifRoom" />
+    <item android:id="@+id/action_select_all" android:title="@string/hl_action_close" android:icon="@drawable/ic_check_box" app:showAsAction="always" />
+</menu>

@@ -187,4 +187,12 @@ public class LawnchairProfileManager {
         }
         Toast.makeText(ctx, "No root explorer found. Install Mixplorer or MT Manager.", Toast.LENGTH_LONG).show();
     }
+
+    public void loadAsync() {
+        new Thread(() -> getAllAppsGroupedByUser()).start();
+    }
+
+    public void registerPackageListener(Context ctx) {
+        MultiUserAppsHelper.getInstance(ctx).registerPackageListener(ctx);
+    }
 }

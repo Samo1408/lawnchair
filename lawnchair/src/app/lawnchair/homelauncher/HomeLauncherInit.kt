@@ -9,8 +9,14 @@ object HomeLauncherInit {
     fun initialize(context: Context) {
         if (initialized) return
         initialized = true
-        LawnchairProfileManager.getInstance(context).loadAllAsync()
+
+        // Start loading apps from all users in background
+        LawnchairProfileManager.getInstance(context).loadAsync()
+
+        // Listen for package changes to auto-refresh
         LawnchairProfileManager.getInstance(context).registerPackageListener(context)
+
+        // Initialize Home-Launcher integration
         HomeLauncherIntegration.initialize(context)
     }
 }

@@ -1,46 +1,32 @@
 /*
- * Home-Launcher Integration for Lawnchair
- * 
- * Main integration point that ties together all Home-Launcher features:
- * - Multi-user apps cache (MultiUserAppsHelper)
- * - Screen lock (QuickLockHelper)
- * - Filling grid layout (FillingGridLayoutManager)
- * 
- * This module enhances Lawnchair with features from Samo1408/Home-Launcher.
+ * Copyright 2026, Lawnchair
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package app.lawnchair.homelauncher
 
 import android.content.Context
-import app.lawnchair.LawnchairLauncher
-import app.lawnchair.gestures.handlers.GestureHandler
-import app.lawnchair.lawnchairApp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-/**
- * Gesture handler to lock the screen - can be bound to any gesture
- * in Lawnchair's gesture settings.
- */
-class HomeLauncherLockGestureHandler(context: Context) : GestureHandler(context) {
-
-    override suspend fun onTrigger(launcher: LawnchairLauncher) {
-        QuickLockHelper.lockWithFeedback(launcher)
-    }
-}
-
-/**
- * Initialize Home-Launcher integrations when the app starts.
- * Call this from LawnchairApp.onCreate() or similar.
- */
 object HomeLauncherIntegration {
 
     fun initialize(context: Context) {
-        // Start loading apps in background for fast drawer access
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+        CoroutineScope(Dispatchers.IO).launch {
             MultiUserAppsHelper.getInstance(context).loadAll()
         }
-
-        // Listen for package changes
         MultiUserAppsHelper.getInstance(context).registerPackageListener(context)
     }
 }

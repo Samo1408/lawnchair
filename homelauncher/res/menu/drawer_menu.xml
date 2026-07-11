@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"><item android:id="@+id/action_sort_az" android:title="Sort A-Z"/><item android:id="@+id/action_sort_za" android:title="Sort Z-A"/><item android:id="@+id/action_refresh" android:title="Refresh"/><item android:id="@+id/action_settings" android:title="Settings"/></menu>

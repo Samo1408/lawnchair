@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android" android:id="@+id/root" android:layout_width="match_parent" android:layout_height="match_parent" android:background="@drawable/wallpaper_bg">
+<FrameLayout android:id="@+id/homeContent" android:layout_width="match_parent" android:layout_height="match_parent">
+<androidx.viewpager2.widget.ViewPager2 android:id="@+id/desktopPager" android:layout_width="match_parent" android:layout_height="match_parent"/>
+<TextView android:id="@+id/desktopPageIndicator" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="bottom|center_horizontal" android:layout_marginBottom="8dp" android:textSize="12sp" android:textColor="#66FFFFFF"/>
+</FrameLayout>
+<LinearLayout android:id="@+id/drawer" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:background="@drawable/drawer_bg" android:visibility="gone" android:clickable="true">
+<LinearLayout android:id="@+id/drawerHeader" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:padding="12dp">
+<ImageButton android:id="@+id/closeDrawer" android:layout_width="48dp" android:layout_height="48dp" android:src="@android:drawable/arrow_down_float" android:background="?selectableItemBackgroundBorderless"/>
+<TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Apps" android:textSize="20sp" android:textColor="@color/onSurface" android:gravity="center"/>
+<ImageButton android:id="@+id/sortDrawer" android:layout_width="48dp" android:layout_height="48dp" android:background="?selectableItemBackgroundBorderless"/>
+<ImageButton android:id="@+id/refreshDrawer" android:layout_width="48dp" android:layout_height="48dp" android:background="?selectableItemBackgroundBorderless"/>
+<ImageButton android:id="@+id/settingsBtn" android:layout_width="48dp" android:layout_height="48dp" android:background="?selectableItemBackgroundBorderless"/>
+</LinearLayout>
+<LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content">
+<TextView android:id="@+id/tabPersonal" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Personal" android:gravity="center" android:padding="8dp" android:textColor="@color/onSurface"/>
+<TextView android:id="@+id/tabWork" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Work" android:gravity="center" android:padding="8dp" android:textColor="@color/onSurface"/>
+</LinearLayout>
+<androidx.viewpager2.widget.ViewPager2 android:id="@+id/drawerPager" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"/>
+</LinearLayout>
+<ImageButton android:id="@+id/openDrawer" android:layout_width="48dp" android:layout_height="48dp" android:layout_gravity="bottom|center_horizontal" android:layout_marginBottom="16dp" android:src="@android:drawable/arrow_up_float" android:background="@drawable/drawer_bg"/>
+</FrameLayout>
